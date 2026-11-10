@@ -1,0 +1,76 @@
+# Builds the G-Tools extension and publishes it as a Blender extension
+# repository on GitHub Pages: https://crocat96.github.io/GTools/index.json
+#
+# Blender only offers an update when `version` in GTools/blender_manifest.toml
+# is higher than the installed one, so bump it for every release.
+
+name: Publish extension
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "GTools/**"
+      - ".github/workflows/publish-extension.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  BLENDER_SERIES: "5.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Blender runtime libraries
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libxi6 libxxf86vm1 libxfixes3 libxrender1 \
+            libgl1 libegl1 libxkbcommon0 libsm6 libice6
+
+      - name: Download Blender ${{ env.BLENDER_SERIES }}
+        run: |
+          set -euo pipefail
+          base="https://download.blender.org/release/Blender${BLENDER_SERIES}"
+          file=$(curl -fsSL "$base/" \
+            | grep -oE "blender-${BLENDER_SERIES}\.[0-9]+-linux-x64\.tar\.xz" \
+            | sort -uV | tail -1)
+          echo "Using $file"
+          curl -fsSL "$base/$file" | tar -xJ
+          echo "BLENDER=$PWD/${file%.tar.xz}/blender" >> "$GITHUB_ENV"
+
+      - name: Validate, build and generate repository index
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          "$BLENDER" --factory-startup --command extension validate GTools
+          "$BLENDER" --factory-startup --command extension build \
+            --source-dir GTools --output-dir site
+          "$BLENDER" --factory-startup --command extension server-generate \
+            --repo-dir site --html
+          ls -la site
+          cat site/index.json
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

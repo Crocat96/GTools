@@ -7,7 +7,7 @@ tagline = "Faster, smarter hard-surface modeling tools and pies"
 maintainer = "Gabriel Jimenez"
 type = "add-on"
 
-website = "https://github.com/Crocat96/G-Tools"
+website = "https://github.com/Crocat96/GTools"
 tags = ["3D View", "Modeling", "Mesh"]
 
 blender_version_min = "5.0.0"
@@ -26,4 +26,5 @@ paths_exclude_pattern = [
   "*.zip",
   "/HEAVYPOLY_menu_master.py",
   "/HEAVYPOLY_select_through_border.py",
+  "/Keymaplists.py",
 ]
