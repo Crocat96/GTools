@@ -20,6 +20,12 @@ ways (faint, the way past the neighbour or past a border) and where it started (
 
 While sliding:
 - Move the mouse: slide. Left click / Enter: confirm. Right click / Esc: cancel.
+- L: lock the axis. Every vertex keeps the edge it is on and the mouse only says how
+  far, both ways: drag back past the start and it keeps going along the same edges
+  (extended), instead of jumping to the edges on the other side. L again unlocks.
+  The locked path is drawn in orange.
+- Wheel / Tab (Shift Tab back): step to the next edge direction of the vertex under
+  the mouse and lock it, keeping how far it has slid: picks the axis without aiming.
 - E: Even (every vertex moves the same distance) or proportional (default: every
   vertex reaches its neighbour at the same time, like Blender's edge slide).
 - Shift: precision. Ctrl: factor in steps of 0.1.
@@ -232,6 +238,38 @@ def factor_from_mouse(ref, project, delta):
     return delta.dot(screen) / screen.length_squared, screen.normalized()
 
 
+def locked_screen(ref, project, guide):
+    """On-screen vector (pixels for one whole rail) of the reference's rail picked by
+    a locked guide, pointing along the guide, or None."""
+    picked = choose_rail(ref, project, guide)
+    if picked is None:
+        return None
+    _, sign, screen = picked
+    return screen * sign
+
+
+def factor_locked(ref, project, guide, delta):
+    """Signed slide factor with the axis locked: the mouse only says how far, along
+    the same rails both ways, so going back past the start keeps extending the same
+    edges instead of jumping to the ones on the other side."""
+    screen = locked_screen(ref, project, guide)
+    if screen is None or screen.length_squared < 1e-12:
+        return 0.0
+    return delta.dot(screen) / screen.length_squared
+
+
+def axes(ref, project):
+    """On-screen unit directions of the reference vertex's rails, in a fixed order
+    (by angle), to step through with the wheel / Tab."""
+    import math
+    out = []
+    for rail in ref.rails:
+        s = _screen_vec(project, ref.origin, rail)
+        if s is not None and s.length > 1e-6:
+            out.append(s.normalized())
+    return sorted(out, key=lambda d: math.atan2(d.y, d.x))
+
+
 def plan_moves(verts, project, guide, factor, even, ref=None):
     """[(vertex, rail or None, signed distance along the rail's direction)] for the
     current slide: rail * factor (proportional), or the same world distance as the
@@ -309,6 +347,7 @@ def _projector(region, rv3d):
 
 RAIL_COLOR = (0.3, 0.85, 1.0, 0.95)
 LINE_COLOR = (0.3, 0.85, 1.0, 0.35)
+LOCKED_LINE_COLOR = (1.0, 0.55, 0.15, 0.8)  # the axis is locked: these lines are the path, both ways
 ORIGIN_COLOR = (1.0, 0.8, 0.2, 1.0)
 
 
@@ -320,7 +359,9 @@ def _draw_path(op, context):
     gpu.state.depth_test_set('NONE')
     line = gpu.shader.from_builtin('POLYLINE_UNIFORM_COLOR')
     line.uniform_float("viewportSize", (context.region.width, context.region.height))
-    for segs, width, color in ((extensions, 1.5, LINE_COLOR), (edges, 2.5, RAIL_COLOR)):
+    locked = getattr(op, "locked", False)
+    ext_style = (2.0, LOCKED_LINE_COLOR) if locked else (1.5, LINE_COLOR)
+    for segs, width, color in ((extensions, *ext_style), (edges, 2.5, RAIL_COLOR)):
         if segs:
             line.uniform_float("lineWidth", width)
             line.uniform_float("color", color)
@@ -417,6 +458,8 @@ class GTOOLS_OT_smart_slide(bpy.types.Operator):
         self.delta = Vector((0.0, 0.0))
         self.factor = 0.0
         self.current_guide = None
+        self.locked = False
+        self.axis_index = -1
         self._refresh_lines()
         self._draw_handle = bpy.types.SpaceView3D.draw_handler_add(
             _draw_path, (self, context), 'WINDOW', 'POST_VIEW')
@@ -440,7 +483,44 @@ class GTOOLS_OT_smart_slide(bpy.types.Operator):
             return
         context.area.header_text_set(
             f"Smart Slide   Factor: {self.factor:.3f}   "
+            f"L: Lock axis ({'on' if self.locked else 'off'})   Wheel / Tab: next axis   "
             f"E: Even ({'on' if self.even else 'off'})   Shift: precision   Ctrl: steps of 0.1")
+
+    def _toggle_lock(self, context, event):
+        if self.locked:
+            self.locked = False  # the mouse picks the side again
+            self.axis_index = -1
+        elif self.current_guide is None:
+            self._next_axis(context, event, 1)  # nothing picked yet: lock the first axis
+            return
+        else:
+            self.locked = True
+        self._update(context, event)
+
+    def _next_axis(self, context, event, step):
+        """Lock onto the reference vertex's next edge direction, keeping how far it has
+        slid, so the axis can be picked without aiming the mouse."""
+        candidates = axes(self.ref, self.project)
+        if not candidates:
+            return
+        # How far the vertex under the mouse has gone (world units), to keep it.
+        travelled = 0.0
+        if self.current_guide is not None:
+            picked = choose_rail(self.ref, self.project, self.current_guide)
+            if picked is not None:
+                travelled = abs(self.factor) * picked[0].length
+            # start from the axis in use
+            if self.axis_index < 0:
+                self.axis_index = max(range(len(candidates)), key=lambda i: candidates[i].dot(self.current_guide))
+        self.axis_index = (self.axis_index + step) % len(candidates)
+        self.current_guide = candidates[self.axis_index]
+        self.guide = self.current_guide
+        self.locked = True
+        screen = locked_screen(self.ref, self.project, self.current_guide)
+        picked = choose_rail(self.ref, self.project, self.current_guide)
+        if screen is not None and picked is not None:
+            self.delta = screen * (travelled / picked[0].length)  # same distance, along the new axis
+        self._update(context, event)
 
     def _update(self, context, event):
         if self.push:
@@ -454,7 +534,11 @@ class GTOOLS_OT_smart_slide(bpy.types.Operator):
             self._header(context)
             context.area.tag_redraw()
             return
-        f, guide = factor_from_mouse(self.ref, self.project, self.delta)
+        if self.locked:
+            f = factor_locked(self.ref, self.project, self.current_guide, self.delta)
+            guide = None
+        else:
+            f, guide = factor_from_mouse(self.ref, self.project, self.delta)
         if event.ctrl:
             f = round(f * 10.0) / 10.0
         self.factor = f
@@ -487,6 +571,11 @@ class GTOOLS_OT_smart_slide(bpy.types.Operator):
             self._update(context, event)
         elif event.type in {'LEFT_CTRL', 'RIGHT_CTRL'} and event.value in {'PRESS', 'RELEASE'}:
             self._update(context, event)
+        elif not self.push and event.type == 'L' and event.value == 'PRESS':
+            self._toggle_lock(context, event)
+        elif not self.push and event.value == 'PRESS' and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE', 'TAB'}:
+            back = event.type == 'WHEELDOWNMOUSE' or (event.type == 'TAB' and event.shift)
+            self._next_axis(context, event, -1 if back else 1)
         elif event.type in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
             self._finish(context)
             return {'FINISHED'}

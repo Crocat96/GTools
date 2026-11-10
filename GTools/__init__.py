@@ -1,7 +1,7 @@
 bl_info = {
     "name": "G TOOLS",
     "author": "Gabriel Jimenez",
-    "version": (0, 6, 0),
+    "version": (0, 7, 0),
     "blender": (5, 0, 0),
     "location": "Edit > Preferences > Add-ons > G Tools (hotkeys) | View3D > Sidebar > G-Tools",
     "description": "Quicker and smarter Blender tools",

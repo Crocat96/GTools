@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "gtools"
-version = "0.6.0"
+version = "0.7.0"
 name = "G-Tools"
 tagline = "Faster, smarter hard-surface modeling tools and pies"
 maintainer = "Gabriel Jimenez"

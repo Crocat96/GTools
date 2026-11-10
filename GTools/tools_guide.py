@@ -25,7 +25,10 @@ GUIDE = (
          "Vertices and edges: slide along their edges as infinite lines, past the next vertex and past "
          "mesh borders (the opposite edge, extended). Faces: push them along their edges, so they ride "
          "up or down edges that converge or diverge and stay flat. The path is drawn while you drag. "
-         "E: Even. Shift: precision. Ctrl: steps of 0.1. The exact value is in the redo panel."),
+         "L locks the slide axis: drag back past the start and it keeps extending the same edges "
+         "instead of jumping to the other side (L again unlocks). Wheel / Tab steps to the next edge "
+         "direction and locks it, without aiming the mouse. E: Even. Shift: precision. Ctrl: steps "
+         "of 0.1. The exact value is in the redo panel."),
         ("X-Ray Selection", "Box, lasso and circle select (X-Ray Selection option)",
          "Selects through the object: X-ray is turned on while you select and off again afterwards."),
         ("Full G-Tools extras", "Hotkey Style: Full G-Tools",
