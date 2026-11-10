@@ -42,6 +42,7 @@ Herramientas propias (prefijo de clases `GTOOLS_`, operadores `*.gtools_*`):
 | `panel_line` | Panel line estilo DECALmachine desde un cutter (grupo `GT_PanelLine_strip`). |
 | `ornament` | Shift A → curva con molduras por Geometry Nodes (`GT_Ornament_v2`, perfiles `GT_Profile_*`). |
 | `curve_patch` | Pie Select (Object Mode, solo con 2–4 curvas seleccionadas) → objeto "Patch" con parche de Coons vivo (grupo `GT_CurvePatch`): 4 curvas = parche, 3 = triangular (lado Top colapsado), 2 = loft reglado. Orientación (Bottom/Top/Left/Right + Reverse) calculada al crear desde los extremos; editable en el modificador. Solo usa el primer spline. |
+| `smart_slide` | Shift G en Edit Mode (vía `mesh.push_and_slide`, que en modo cara sigue haciendo shrink/fatten). Vertex + edge slide en uno: cada vértice sigue una arista hacia un vecino no seleccionado tratada como línea infinita (pasa del vecino y, si no hay arista hacia el ratón, sigue la opuesta prolongada: sale por los bordes). E = Even, Shift = precisión, Ctrl = pasos de 0.1. Lógica separada de la proyección (`project` inyectable) para poder testearla. |
 | `xray_select` | Box/lasso/circle con X-ray temporal. |
 | `keymaps` + `keymap_data` | Atajos configurables en las preferencias del add-on (ver abajo). |
 | `cheatsheet` | Panel "G-Tools" en la barra lateral (N) con los atajos activos. |

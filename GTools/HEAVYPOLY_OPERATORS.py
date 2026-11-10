@@ -98,12 +98,12 @@ class HP_OT_PushAndSlide(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}  # enable undo for the operator.
 
     def invoke(self, context, event):
-        if tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (True, False, False):
-            bpy.ops.transform.vert_slide('INVOKE_DEFAULT', mirror=False, correct_uv=True)
-        elif tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, False, True):
+        # Face mode pushes (shrink / fatten); vertices and edges use Smart Slide,
+        # which also slides past the neighbour and past mesh borders.
+        if tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, False, True):
             bpy.ops.transform.shrink_fatten('INVOKE_DEFAULT', use_even_offset=True, mirror=False)
         else:
-            bpy.ops.transform.edge_slide('INVOKE_DEFAULT', mirror=False, correct_uv=True)
+            bpy.ops.mesh.gtools_smart_slide('INVOKE_DEFAULT')
         return {'FINISHED'}
 
 

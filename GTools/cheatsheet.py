@@ -22,7 +22,7 @@ SECTIONS = (
         ("Smart Extrude", "Mesh", "mesh.hp_extrude", None),
         ("Smart Bevel", "Mesh", "view3d.smart_bevel", None),
         ("Smart Delete", "3D View", "view3d.smart_delete", None),
-        ("Push and Slide", "Mesh", "mesh.push_and_slide", None),
+        ("Smart Slide / Push", "Mesh", "mesh.push_and_slide", None),
         ("Separate and select", "Mesh", "object.separate_and_select", None),
         ("Loop cut", "Mesh", "mesh.hp_simple_loopcut", None),
         ("Subdivision on/off", "3D View", "view3d.subdivision_toggle", None),
