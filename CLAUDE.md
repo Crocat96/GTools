@@ -1,6 +1,7 @@
 # G-Tools — contexto para Claude
 
 Add-on de Blender (modelado hard-surface + pie menus) de Gabriel Jimenez. Responde en **español**.
+**Se desarrolla para Blender 5.3** (el manifest admite desde 5.0; comprobar ambos cuando una API pueda diferir).
 Deriva de HEAVYPOLY (archivos `HEAVYPOLY_*`) con herramientas propias nuevas (archivos sin prefijo).
 
 ## Estructura
@@ -20,7 +21,8 @@ Deriva de HEAVYPOLY (archivos `HEAVYPOLY_*`) con herramientas propias nuevas (ar
 - URL del repositorio en Blender: `https://crocat96.github.io/GTools/index.json` (Pages con fuente "GitHub Actions").
 - **Para que Blender ofrezca la actualización hay que subir `version` en el manifest** (y por coherencia en `bl_info`).
 - Probar el build local: `"C:\Program Files\Blender Foundation\Blender 5.0\blender.exe" --command extension build --source-dir GTools --output-dir <dir>`.
-- En este PC hay Blender 3.6, 4.3, 5.0, 5.1 y 5.3; el ejecutable instalado en Program Files es el 5.0.1.
+- Ejecutables en este PC: 5.0.1 en `C:\Program Files\Blender Foundation\Blender 5.0\`; portables (3.6, 4.3, 5.0, 5.1,
+  **5.3 RC**) en `C:\Users\Hp\Documents\Blender\`. La extensión está instalada en el 5.3.
   En `%APPDATA%\Blender Foundation\Blender\5.0\scripts\addons\GTools` sigue la versión antigua como add-on clásico:
   al probar con `--python`, importar una copia renombrada para no cargar esa por error.
 
@@ -59,16 +61,19 @@ operadores "smart" (extrude, bevel, delete, subdivision toggle…), dibujar prim
 
 - Registro: ejecutar en Blender `--background --factory-startup --python` un script que importe el paquete,
   haga `register()`/`unregister()` dos veces y compruebe que no quedan clases. Estado a 2026-11-10: limpio, 54 clases.
-- Antes de usar una API de Blender, comprobarla en Blender 5.0 (`bl_rna`, `hasattr(bpy.ops.x, "y")`), no de memoria.
+- Antes de usar una API de Blender, comprobarla en Blender 5.3 (`bl_rna`, `dir(bpy.ops.x)`), no de memoria.
+- En `--background`, `bpy.ops.x('INVOKE_DEFAULT')` devuelve `PASS_THROUGH` sin ejecutar `invoke()`. Para probar un
+  operador que solo tiene `invoke`, llamar `Clase.invoke(fake_self, context, None)` dentro de
+  `context.temp_override(window=, area=<VIEW_3D>, region=<WINDOW>)`. Los `draw()` de menús se prueban con un layout falso.
 
-## Problemas conocidos (revisión 2026-11-10)
+## Grease Pencil
 
-- Grease Pencil antiguo: desde Blender 4.3 el tipo es `'GREASEPENCIL'` y los modos `*_GREASE_PENCIL`.
-  - `HEAVYPOLY_pie_add.py`: "GPencil" llama a `bpy.ops.object.gpencil_add()` (ya no existe → error)
-    y a `mode_set(mode='GPENCIL_PAINT')` (modo inexistente). Debería ser `object.grease_pencil_add` + `PAINT_GREASE_PENCIL`.
-  - `HEAVYPOLY_pie_selection.py`, `HEAVYPOLY_OPERATORS.py`: ramas `case "GPENCIL"` y `bpy.ops.gpencil.*` muertas;
-    con un objeto Grease Pencil el pie de selección cae en el caso por defecto (botones de malla).
-  - `HP_OT_gp_canvas` no hace nada (asigna a una variable local).
-- `HP_MT_pie_select.draw` usa `context.object.type` sin comprobar `None`: sin objeto activo el pie da error.
+Desde Blender 4.3 (GP v3): tipo de objeto `'GREASEPENCIL'`, modos `EDIT` / `PAINT_GREASE_PENCIL` /
+`SCULPT_GREASE_PENCIL` / `VERTEX_GREASE_PENCIL` / `WEIGHT_GREASE_PENCIL`, operadores `grease_pencil.*` y
+`object.grease_pencil_add`. Los antiguos `'GPENCIL'`, `gpencil.*` y `object.gpencil_add` ya no existen.
+Migrado en 0.2.1 (pie de añadir, pie de selección, Separate and Select, Smart Delete, `gp_canvas`).
+
+## Problemas conocidos
+
 - Muchos operadores `HP_*` no tienen `poll()` y asumen objeto activo.
 - Imports y variables sin usar en los `HEAVYPOLY_*` (cosmético).

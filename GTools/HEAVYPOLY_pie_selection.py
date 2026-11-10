@@ -20,6 +20,8 @@ class HP_MT_pie_select(Menu):
 
     def draw(self, context):
         layout = self.layout
+        obj = context.object
+        obj_type = obj.type if obj else None  # no active object: only the generic buttons
 
         pie = layout.menu_pie()
 
@@ -60,9 +62,9 @@ class HP_MT_pie_select(Menu):
         pie.operator("object.mode_set", text="Object", icon='MESH_CUBE').mode='OBJECT'
         # top
 
-        match bpy.context.object.type:
-            case "GPENCIL":
-                pie.operator('object.mode_set', text = 'GP Edit', icon='EDITMODE_HLT').mode='EDIT_GPENCIL'
+        match obj_type:
+            case "GREASEPENCIL":
+                pie.operator('object.mode_set', text = 'GP Edit', icon='EDITMODE_HLT').mode='EDIT'
             case "META":
                 pie.operator('object.mode_set', text = 'Edit', icon='META_DATA').mode='EDIT'
             case "ARMATURE":
@@ -73,9 +75,9 @@ class HP_MT_pie_select(Menu):
                 pie.operator("object.selectmodesmart", text="Edge", icon='NONE').selectmode='EDGE'
 
         # topleft
-        match bpy.context.object.type:
-            case "GPENCIL":
-                pie.operator('object.mode_set', text = 'GP Draw', icon='GREASEPENCIL').mode='PAINT_GPENCIL'
+        match obj_type:
+            case "GREASEPENCIL":
+                pie.operator('object.mode_set', text = 'GP Draw', icon='GREASEPENCIL').mode='PAINT_GREASE_PENCIL'
             case "ARMATURE":
                 pie.operator('object.mode_set', text = 'Pose', icon='NONE').mode='POSE'
             case "META":
@@ -89,9 +91,9 @@ class HP_MT_pie_select(Menu):
                 pie.operator("object.selectmodesmart", text="Vert", icon='NONE').selectmode='VERT'
 
         # topright
-        match bpy.context.object.type:
-            case "GPENCIL":
-                pie.operator('object.mode_set', text = "GP Sculpt", icon="SCULPTMODE_HLT").mode="SCULPT_GPENCIL"
+        match obj_type:
+            case "GREASEPENCIL":
+                pie.operator('object.mode_set', text = "GP Sculpt", icon="SCULPTMODE_HLT").mode="SCULPT_GREASE_PENCIL"
             case "META":
                 split = pie.split()
                 col = split.column()
@@ -130,16 +132,16 @@ class HP_MT_pie_select(Menu):
         col.separator()
         col.separator()
 
-        match bpy.context.object.type:
+        match obj_type:
             case "MESH":
                 col.operator('object.mode_set', text = 'Sculpt', icon='SCULPTMODE_HLT').mode='SCULPT'
                 col.operator('object.mode_set', text = 'Vertex Paint', icon='VPAINT_HLT').mode='VERTEX_PAINT'
                 col.operator('object.mode_set', text = 'Weight Paint', icon='WPAINT_HLT').mode='WEIGHT_PAINT'
                 col.operator('object.mode_set', text = 'Texture Paint', icon='BRUSH_DATA').mode='TEXTURE_PAINT'
                 col.operator('object.sculpt_mode_with_dynotopo', text = 'Sculpt With Dynotopo', icon='SCULPTMODE_HLT')
-            case "GPENCIL":
-                col.operator('object.mode_set', text = 'Vertex Paint', icon='VPAINT_HLT').mode='VERTEX_GPENCIL'
-                col.operator('object.mode_set', text = 'Weight Paint', icon='WPAINT_HLT').mode='WEIGHT_GPENCIL'
+            case "GREASEPENCIL":
+                col.operator('object.mode_set', text = 'Vertex Paint', icon='VPAINT_HLT').mode='VERTEX_GREASE_PENCIL'
+                col.operator('object.mode_set', text = 'Weight Paint', icon='WPAINT_HLT').mode='WEIGHT_GREASE_PENCIL'
             case "LATTICE":
                 col.operator('object.mode_set', text = 'Weight Paint', icon='WPAINT_HLT').mode='WEIGHT_PAINT'
             case "ARMATURE":
@@ -147,13 +149,13 @@ class HP_MT_pie_select(Menu):
             case "META":
                 pass
 
-            # Particles Will be removed in later versions, keeping it on the bottom for organisation
-            case bpy.context.object.particle_systems:
-                col.operator('object.mode_set', text = 'Particle Edit', icon='PARTICLEMODE').mode='PARTICLE_EDIT'
-
             # New datatypes can easily be added above pass
             case _:
                 pass
+
+        # Particles Will be removed in later versions, keeping it on the bottom for organisation
+        if obj_type == "MESH" and obj.particle_systems:
+            col.operator('object.mode_set', text = 'Particle Edit', icon='PARTICLEMODE').mode='PARTICLE_EDIT'
 
 class HP_OT_gp_canvas(bpy.types.Operator):
     bl_idname = "view3d.gp_canvas"
@@ -161,15 +163,9 @@ class HP_OT_gp_canvas(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
     type: bpy.props.StringProperty(name="Front")
     def execute(self, context):
-
-        gpencil_sculpt_axis = bpy.context.tool_settings.gpencil_sculpt.lock_axis
-
-        if self.type == 'Front':
-            gpencil_sculpt_axis = 'AXIS_Y'
-        if self.type == 'Top':
-            gpencil_sculpt_axis = 'AXIS_Z'
-        if self.type == 'Side':
-            gpencil_sculpt_axis = 'AXIS_X'
+        axis = {'Front': 'AXIS_Y', 'Top': 'AXIS_Z', 'Side': 'AXIS_X'}.get(self.type)
+        if axis:
+            context.tool_settings.gpencil_sculpt.lock_axis = axis
         return {'FINISHED'}
 
 class HP_OT_sculpt_mode_with_dynotopo(bpy.types.Operator):
@@ -189,6 +185,11 @@ class HP_OT_SelectModeSmart(bpy.types.Operator):
     bl_label = "Select Mode Smart"         # display name in the interface.
     bl_options = {'REGISTER', 'UNDO'}  # enable undo for the operator.
     selectmode : bpy.props.StringProperty(name="SelectMode")
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None
+
     def invoke(self, context, event):
         def select(selectmode):
             bpy.ops.mesh.select_mode(type=selectmode)
@@ -199,14 +200,14 @@ class HP_OT_SelectModeSmart(bpy.types.Operator):
                     case "MESH":
                         bpy.ops.object.mode_set(mode='EDIT')
                         select(self.selectmode)
-                    case "GPENCIL":
-                        bpy.ops.object.mode_set(mode='GPENCIL_PAINT')
+                    case "GREASEPENCIL":
+                        bpy.ops.object.mode_set(mode='PAINT_GREASE_PENCIL')
                     case "CURVE" | "FONT":
                         bpy.ops.object.mode_set(mode='EDIT')
             case "EDIT_MESH":
                 select(self.selectmode)
-            case "GPENCIL_PAINT":
-                bpy.context.mode = "OBJECT"
+            case "PAINT_GREASE_PENCIL":
+                bpy.ops.object.mode_set(mode='OBJECT')
             case _:
                 bpy.ops.object.mode_set(mode="EDIT")
         return {'FINISHED'}

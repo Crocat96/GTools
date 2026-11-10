@@ -260,25 +260,17 @@ class HP_OT_SeparateAndSelect(bpy.types.Operator):
         bases = bpy.context.selected_objects
         if bpy.context.object.type == 'MESH':
             bpy.ops.mesh.separate(type='SELECTED')
-        elif bpy.context.object.type == 'GPENCIL':
-            bpy.ops.gpencil.stroke_separate(mode='POINT')
-
-            # bpy.ops.gpencil.stroke_split()
+        elif bpy.context.object.type == 'GREASEPENCIL':
+            bpy.ops.grease_pencil.separate(mode='SELECTED')
         elif bpy.context.object.type == 'CURVE':
             bpy.ops.curve.separate()
-        if bpy.context.object.type == 'GPENCIL':
-            bpy.ops.gpencil.editmode_toggle()
-        else:
-            bpy.ops.object.editmode_toggle()
-            
+        bpy.ops.object.editmode_toggle()
+
         for b in bases:
             b.select_set(state=False)
         selected = bpy.context.selected_objects
         bpy.context.view_layer.objects.active = selected[-1]
-        if bpy.context.object.type == 'GPENCIL':
-            bpy.ops.gpencil.editmode_toggle()
-        else:
-            bpy.ops.object.editmode_toggle()
+        bpy.ops.object.editmode_toggle()
         if bpy.context.object.type == 'MESH':
             bpy.ops.mesh.select_all(action='SELECT')
         if bpy.context.object.type == 'CURVE':
@@ -370,8 +362,8 @@ class HP_OT_Smart_Delete(bpy.types.Operator):
             else:
                 if obj_type == 'CURVE':
                     bpy.ops.curve.delete(type='VERT')
-                elif obj_type == 'GPENCIL':
-                    bpy.ops.gpencil.delete(type='POINTS')
+                elif obj_type == 'GREASEPENCIL':
+                    bpy.ops.grease_pencil.delete()
                 elif obj_type == 'META':
                     bpy.ops.mball.delete_metaelems()
                 elif obj_type == 'MESH':
