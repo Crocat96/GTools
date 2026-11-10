@@ -78,7 +78,10 @@ operadores "smart" (extrude, bevel, delete, subdivision toggle…), dibujar prim
 - Crashes: ejecutar cada caso en **su propio proceso** de Blender (un segfault solo mata ese caso) y revisar la
   salud de la malla tras cada operación. Casos de estrés para Loop Resample: bevels convexos/cóncavos (L, estrella,
   ranura en U, cavidad), bevel 1 segmento, bevels solapados, banda de esfera/toro (no son bevel: deben cancelar),
-  esquina interior recta y **esquina de bandeja con paredes inclinadas** (ángulos obtusos, extremo abierto en diagonal).
+  esquina interior recta y **esquina de bandeja con paredes inclinadas** (ángulos obtusos, extremo abierto en diagonal),
+  y **caja con esquinas redondeadas + inset + cavidad** seleccionando el redondeo de una esquina entera (pared exterior →
+  anillo superior → cavidad): strip que gira dos esquinas de 90° a lo largo. En strips, el perfil es la dirección
+  *suave* (sin giros > 60°), no la que más gira en total.
 - Modales y dibujo GPU de verdad (no funcionan en `--background`): Blender con interfaz +
   `--enable-event-simulate`, un `bpy.app.timers` que va paso a paso con `window.event_simulate(...)`
   (MOUSEMOVE / LEFTMOUSE / WHEELUPMOUSE / RET) y `bpy.ops.wm.quit_blender()` al final. Abre una ventana unos segundos.

@@ -445,7 +445,14 @@ def find_strip(bm, faces):
             return network
 
     t_rows, t_cols = turning(rows), turning(columns)
-    if abs(t_rows - t_cols) > math.radians(10):
+    s_rows, s_cols = sharpest(rows), sharpest(columns)
+    hard = math.radians(60)
+    if (s_rows > hard) != (s_cols > hard):
+        # A bevel's profile is a smooth curve (a little turn per segment); the long way
+        # turns at hard corners (a rounded corner running down a wall, across a top and
+        # into a pocket). Total turning alone would pick the long way there.
+        profiles = columns if s_rows > hard else rows
+    elif abs(t_rows - t_cols) > math.radians(10):
         profiles = rows if t_rows > t_cols else columns
     elif t_rows < math.radians(1) and t_cols < math.radians(1):
         # Flat both ways (a chamfer): the profiles are the way across whose two
@@ -672,7 +679,8 @@ def _end_face_plan(bm, profiles, new_profiles, faces):
         for f in _end_faces(bm, profile, faces):
             verts = _replace_run(plan.get(f, list(f.verts)), profile, new_profile)
             if verts is None:
-                raise Unsafe("an end of the bevel meets faces it can't be rebuilt into")
+                raise Unsafe("the bevel carries on past the selection: select all of it "
+                             "(e.g. the whole rounded corner, down the walls too)")
             plan[f] = verts
     for f, verts in plan.items():
         if len(verts) < 3 or len(set(verts)) != len(verts):
