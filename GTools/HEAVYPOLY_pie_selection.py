@@ -32,6 +32,10 @@ class HP_MT_pie_select(Menu):
             tools = row.column()
             tools.scale_y = 1.5
             tools.operator("object.select_grouped", text="Select Collection").type = 'COLLECTION'
+            # Only with 2 to 4 curve objects selected.
+            from .curve_patch import patch_curves
+            if patch_curves(context):
+                tools.operator("object.gtools_curve_patch", text="Create Patch from Curves")
             col = row.column()
             col.scale_y=1.5
             col.operator("object.select_grouped", text="Similar")
