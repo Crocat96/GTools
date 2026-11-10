@@ -1,0 +1,29 @@
+schema_version = "1.0.0"
+
+id = "gtools"
+version = "0.2.0"
+name = "G-Tools"
+tagline = "Faster, smarter hard-surface modeling tools and pies"
+maintainer = "Gabriel Jimenez"
+type = "add-on"
+
+website = "https://github.com/Crocat96/G-Tools"
+tags = ["3D View", "Modeling", "Mesh"]
+
+blender_version_min = "5.0.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2026 Gabriel Jimenez"]
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/.github/",
+  "/tools/",
+  "/dist/",
+  "/config/",
+  "*.zip",
+  "/HEAVYPOLY_menu_master.py",
+  "/HEAVYPOLY_select_through_border.py",
+]

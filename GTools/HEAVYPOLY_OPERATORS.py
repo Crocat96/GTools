@@ -1,0 +1,465 @@
+bl_info = {
+    "name": "Heavypoly Operators",
+    "description": "Operators that make for smooth blending",
+    "author": "Vaughan Ling",
+    "version": (0, 1, 0),
+    "blender": (4, 0, 0),
+    "location": "",
+    "warning": "",
+    "wiki_url": "",
+    "category": "Operators"
+    }
+
+import bpy
+import bmesh
+from bpy.types import Menu
+from bpy.types import Operator
+from bpy.props import BoolProperty
+from mathutils import Color
+
+class HP_OT_loopcut(bpy.types.Operator):
+    bl_idname = "mesh.hp_simple_loopcut"
+    bl_label = "Simple Loopcut"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def modal(self, context, event):
+        if event.type == 'MOUSEMOVE':
+            bpy.ops.mesh.loopcut_slide('INVOKE_DEFAULT')
+            return {'FINISHED'}
+        elif event.type in {'RIGHTMOUSE', 'ESC'}:
+            return {'CANCELLED'}
+        return {'RUNNING_MODAL'}
+
+    def invoke(self, context, event):
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+
+class HP_OT_smart_snap_origin(bpy.types.Operator):
+    bl_idname = "view3d.smart_snap_origin"        # unique identifier for buttons and menu items to reference.
+    bl_label = "Snap origin to selection"         # display name in the interface.
+    bl_options = {'REGISTER', 'UNDO'}  # enable undo for the operator.
+    def invoke(self, context, event):
+        print('smartsnaporigin')
+        cursor_start_location = bpy.context.scene.cursor.location * 1
+        # print(cursor_start_location)
+        try:
+            if context.active_object.mode == 'EDIT':
+                if context.active_object.type == 'MESH':
+                    if  context.object.data.total_vert_sel == 0:
+                        bpy.ops.view3d.snap_cursor_to_center()
+                        bpy.ops.object.mode_set(mode='OBJECT')
+                        bpy.ops.object.origin_set(type = 'ORIGIN_CURSOR')
+                        bpy.ops.object.mode_set(mode='EDIT')
+                    else:
+                        bpy.ops.view3d.snap_cursor_to_selected()
+                        bpy.ops.object.mode_set(mode='OBJECT')
+                        bpy.ops.object.origin_set(type = 'ORIGIN_CURSOR')
+                        bpy.ops.object.mode_set(mode='EDIT')
+                else:
+                    bpy.ops.view3d.snap_cursor_to_selected()
+                    bpy.ops.object.mode_set(mode='OBJECT', toggle=False)
+                    bpy.ops.object.origin_set(type = 'ORIGIN_CURSOR')
+                    #bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+                    bpy.ops.object.mode_set(mode='EDIT', toggle=False)
+            elif len(bpy.context.selected_objects) > 0:
+                bpy.ops.object.origin_set(type = 'ORIGIN_GEOMETRY')
+            else:
+                #bpy.ops.view3d.snap_cursor_to_center()
+                #bpy.ops.object.origin_set(type = 'ORIGIN_CURSOR')
+                bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+            #bpy.context.scene.tool_settings.transform_pivot_point = 'MEDIAN_POINT'
+            print(cursor_start_location)
+            bpy.context.scene.cursor.location = (cursor_start_location[0],cursor_start_location[1],cursor_start_location[2])
+        except:
+            return {'FINISHED'}
+        return {'FINISHED'}
+
+class HP_OT_duplicate_move(bpy.types.Operator):
+    bl_idname = "view3d.hp_duplicate_move"
+    bl_label = "Duplicate Move"
+    bl_options = {'REGISTER'}
+    def invoke(self, context, event):
+        if context.active_object.mode == 'OBJECT':
+            bpy.ops.object.duplicate('INVOKE_DEFAULT', False)
+            bpy.ops.transform.translate('INVOKE_DEFAULT', False)
+
+        if context.active_object.mode == 'EDIT':
+            bpy.ops.mesh.duplicate('INVOKE_DEFAULT', False)
+            bpy.ops.transform.translate('INVOKE_DEFAULT', False)
+
+        return {'FINISHED'}
+
+
+
+class HP_OT_PushAndSlide(bpy.types.Operator):
+    bl_idname = "mesh.push_and_slide"        # unique identifier for buttons and menu items to reference.
+    bl_label = "Push And Slide"         # display name in the interface.
+    bl_options = {'REGISTER', 'UNDO'}  # enable undo for the operator.
+
+    def invoke(self, context, event):
+        if tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (True, False, False):
+            bpy.ops.transform.vert_slide('INVOKE_DEFAULT', mirror=False, correct_uv=True)
+        elif tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, False, True):
+            bpy.ops.transform.shrink_fatten('INVOKE_DEFAULT', use_even_offset=True, mirror=False)
+        else:
+            bpy.ops.transform.edge_slide('INVOKE_DEFAULT', mirror=False, correct_uv=True)
+        return {'FINISHED'}
+
+
+class HP_OT_extrude(Operator):
+    """Operator for context-sensitive extrusion in Blender.
+    It handles different extrusion types based on the current selection and object type."""
+    
+    bl_label = "Smart Extrude"
+    bl_idname = "mesh.hp_extrude"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        """Check if the operator can be run in the current context."""
+        obj = context.active_object
+        return obj is not None and obj.mode == 'EDIT'
+
+    def invoke(self, context, event):
+        """The main function called when the operator is run."""
+        
+        # Handle curve objects separately
+        if bpy.context.object.type == 'CURVE':
+            bpy.ops.curve.extrude()
+            bpy.ops.transform.translate('INVOKE_DEFAULT')
+            print('EXTRUDING CURVES')
+            return {'FINISHED'}
+        
+        # Get the active mesh and selection counts
+        mesh = context.object.data
+        total_faces_selected = mesh.total_face_sel
+        total_edges_selected = mesh.total_edge_sel
+        total_verts_selected = mesh.total_vert_sel
+
+        # Handle no selection by placing a new vertex
+        if total_verts_selected == 0:
+            bpy.ops.mesh.select_mode(type='VERT')
+            bpy.ops.mesh.dupli_extrude_cursor('INVOKE_DEFAULT')
+            print('PLACING VERT')
+            return {'FINISHED'}
+
+        # Extrude vertices if only vertices are selected
+        if total_verts_selected > 0 and total_edges_selected == 0:
+            print('EXTRUDING VERTS')
+            bpy.ops.mesh.extrude_region_move('INVOKE_DEFAULT')
+            return {'FINISHED'}
+
+        # Extrude edges if only edges are selected
+        if total_edges_selected > 0 and total_faces_selected == 0:
+            print('EXTRUDING EDGES')
+            bpy.ops.mesh.extrude_region_move('INVOKE_DEFAULT')
+            return {'FINISHED'}
+
+        # Extrude faces if any faces are selected
+        print('EXTRUDING FACES')
+        bpy.ops.mesh.extrude_region_move('EXEC_DEFAULT')
+
+        # Special handling for partial mesh selection
+        if total_faces_selected != mesh.total_face_sel:
+            print('Partial mesh selected')
+            bpy.ops.transform.shrink_fatten('INVOKE_DEFAULT', use_even_offset=True)
+            return {'FINISHED'}
+
+        # Add this operator to the window manager for modal operations
+        context.window_manager.modal_handler_add(self)
+
+        # Additional operations if faces were selected
+        if total_faces_selected > 0:
+            print('Extruding Faces w vertex group')
+            bpy.ops.transform.shrink_fatten('INVOKE_DEFAULT', use_even_offset=True)
+            print('FIXING NORMALS')
+            return {'RUNNING_MODAL'}
+        
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        """Handle modal operations for further adjustments after extrusion."""
+        if event.type == 'MOUSEMOVE':
+            # Save the current selection of faces
+            obj = bpy.context.active_object
+            mesh = obj.data
+            bpy.ops.object.mode_set(mode='OBJECT')  # Switch to Object mode to safely access mesh data
+            selected_faces = [face.index for face in mesh.polygons if face.select]
+            bpy.ops.object.mode_set(mode='EDIT')  # Switch back to Edit mode
+            
+            # Recalculate normals and deselect everything
+            bpy.ops.mesh.select_linked()
+            bpy.ops.mesh.normals_make_consistent(inside=False)
+            bpy.ops.mesh.select_all(action='DESELECT')
+
+            # Reselect the previously selected faces
+            bpy.ops.object.mode_set(mode='OBJECT')  # Switch to Object mode to modify selection
+            for face_idx in selected_faces:
+                mesh.polygons[face_idx].select = True
+            bpy.ops.object.mode_set(mode='EDIT')  # Switch back to Edit mode
+
+            print('Extrude modal')
+            return {'FINISHED'}
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            return {'CANCELLED'}
+        
+        return {'RUNNING_MODAL'}
+
+
+class HP_OT_SmartBevel(bpy.types.Operator):
+    bl_idname = "view3d.smart_bevel"        # unique identifier for buttons and menu items to reference.
+    bl_label = "Smart Bevel"         # display name in the interface.
+    bl_options = {'REGISTER', 'UNDO'}  # enable undo for the operator.
+
+    def invoke(self, context, event):
+        if context.active_object.mode == 'OBJECT':
+            print('Only works in Edit Mode')
+            #bpy.ops.view3d.hp_draw('INVOKE_DEFAULT')
+        else:
+            me = bpy.context.object.data
+            bm = bmesh.from_edit_mesh(me)
+            sel = []
+            for v in bm.verts:
+                if v.select:
+                    sel.append(v)
+            if len(sel) == 0:
+                print('Nothing Selected')
+                # bpy.ops.view3d.hp_draw('INVOKE_DEFAULT')
+            else:
+                if tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (True, False, False):
+                    bpy.ops.mesh.bevel('INVOKE_DEFAULT',clamp_overlap=True,affect='VERTICES')
+                    return {'FINISHED'}
+                elif tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, False, True):
+                    bpy.ops.mesh.select_mode(type = 'EDGE')
+                    print('edge mode...')
+                    bpy.ops.mesh.region_to_loop('INVOKE_DEFAULT')
+                    print('selecting border...')
+                    me = bpy.context.object.data
+                    bm = bmesh.from_edit_mesh(me)
+                    sel = []
+                    for v in bm.verts:
+                        if v.select:
+                            sel.append(v)
+                    if len(sel) == 0:
+                        bpy.ops.mesh.select_all(action='SELECT')
+                bpy.ops.mesh.bevel('INVOKE_DEFAULT', clamp_overlap=True, miter_outer='ARC')
+            bpy.ops.mesh.remove_doubles()
+
+        return {'FINISHED'}
+
+
+
+
+class HP_OT_SeparateAndSelect(bpy.types.Operator):
+    bl_idname = "object.separate_and_select"        # unique identifier for buttons and menu items to reference.
+    bl_label = "Separate and Select"         # display name in the interface.
+    bl_options = {'REGISTER', 'UNDO'}  # enable undo for the operator.
+    def execute(self, context):
+
+        bases = bpy.context.selected_objects
+        if bpy.context.object.type == 'MESH':
+            bpy.ops.mesh.separate(type='SELECTED')
+        elif bpy.context.object.type == 'GPENCIL':
+            bpy.ops.gpencil.stroke_separate(mode='POINT')
+
+            # bpy.ops.gpencil.stroke_split()
+        elif bpy.context.object.type == 'CURVE':
+            bpy.ops.curve.separate()
+        if bpy.context.object.type == 'GPENCIL':
+            bpy.ops.gpencil.editmode_toggle()
+        else:
+            bpy.ops.object.editmode_toggle()
+            
+        for b in bases:
+            b.select_set(state=False)
+        selected = bpy.context.selected_objects
+        bpy.context.view_layer.objects.active = selected[-1]
+        if bpy.context.object.type == 'GPENCIL':
+            bpy.ops.gpencil.editmode_toggle()
+        else:
+            bpy.ops.object.editmode_toggle()
+        if bpy.context.object.type == 'MESH':
+            bpy.ops.mesh.select_all(action='SELECT')
+        if bpy.context.object.type == 'CURVE':
+            bpy.ops.curve.select_all(action='SELECT')
+        return {'FINISHED'}
+
+
+class HP_OT_SmartShadeSmooth(bpy.types.Operator):
+    bl_idname = "view3d.smart_shade_smooth_toggle"
+    bl_label = "Smart Shade Smooth"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def invoke(self, context, event):
+        # Guardar objeto y modo actual
+        active_obj = context.object
+        original_mode = active_obj.mode if active_obj else 'OBJECT'
+
+        # Switch to Object Mode so shading can be changed
+        if active_obj and original_mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        # Solo aplicar a objetos Mesh seleccionados
+        for obj in context.selected_objects:
+            if obj.type != 'MESH':
+                continue
+            context.view_layer.objects.active = obj
+            try:
+                bpy.ops.object.shade_auto_smooth()
+            except:
+                # Fallback si el operador no existe en versiones futuras
+                bpy.ops.object.shade_smooth()
+
+        # Restaurar modo original
+        if active_obj:
+            context.view_layer.objects.active = active_obj
+            if original_mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode=original_mode)
+
+        return {'FINISHED'}
+    
+    
+class HP_OT_toggle_render_material(bpy.types.Operator):
+    bl_idname = "view3d.toggle_render_material"        # unique identifier for buttons and menu items to reference.
+    bl_label = ""         # display name in the interface.
+    bl_options = {'REGISTER', 'UNDO'}  # enable undo for the operator.
+
+    def invoke(self, context, event):
+        if bpy.context.space_data.viewport_shade != 'MATERIAL':
+            bpy.context.space_data.viewport_shade = 'MATERIAL'
+        elif bpy.context.space_data.viewport_shade == 'MATERIAL':
+            bpy.context.space_data.viewport_shade = 'RENDERED'
+        return {'FINISHED'}
+
+
+class HP_OT_Smart_Delete(bpy.types.Operator):
+    bl_idname = "view3d.smart_delete"
+    bl_label = "Smart Delete"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def invoke(self, context, event):
+        obj = context.object
+        obj_type = getattr(obj, 'type', '')
+        active_object = bpy.context.active_object
+
+        try:
+            if not active_object:
+                for selected_object in bpy.context.selected_objects:
+                    bpy.context.view_layer.objects.active = selected_object
+                    active_object = bpy.context.active_object
+                    break  # Set the active object to the first selected object
+
+            if not active_object:
+                self.report({'WARNING'}, "No active or selected objects found")
+                return {'CANCELLED'}
+
+            active_object_name = active_object.name
+            mode = context.active_object.mode
+
+            if mode == 'OBJECT':
+                if '_Cutter' in active_object_name:
+                    bpy.ops.object.delete(use_global=False)
+                    for obj in bpy.context.view_layer.objects:
+                        bpy.context.view_layer.objects.active = obj
+                        bpy.ops.object.modifier_remove(modifier=active_object_name)
+                    from .sharp_subtract import purge_orphan_cutters
+                    purge_orphan_cutters()
+                else:
+                    bpy.ops.object.delete(use_global=False)
+            else:
+                if obj_type == 'CURVE':
+                    bpy.ops.curve.delete(type='VERT')
+                elif obj_type == 'GPENCIL':
+                    bpy.ops.gpencil.delete(type='POINTS')
+                elif obj_type == 'META':
+                    bpy.ops.mball.delete_metaelems()
+                elif obj_type == 'MESH':
+                    if tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, False, True):
+                        bpy.ops.mesh.delete(type='FACE')
+                    else:
+                        bpy.ops.mesh.delete(type='VERT')
+        except Exception as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+    
+    
+class HP_OT_Subdivision_Toggle(bpy.types.Operator):
+    bl_idname = "view3d.subdivision_toggle"
+    bl_label = "Subdivision Toggle"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def invoke(self, context, event):
+
+        for o in bpy.context.selected_objects:
+            bpy.context.view_layer.objects.active = o
+            if 0 < len([m for m in bpy.context.object.modifiers if m.type == "SUBSURF"]):
+                if bpy.context.object.modifiers["Subsurf_Base"].show_viewport == False:
+                    bpy.context.object.modifiers["Subsurf_Base"].show_render = True
+                    bpy.context.object.modifiers["Subsurf_Base"].show_viewport = True
+                else:
+                    bpy.context.object.modifiers["Subsurf_Base"].show_render = False
+                    bpy.context.object.modifiers["Subsurf_Base"].show_viewport = False
+
+            else:
+                o.modifiers.new("Subsurf_Base", "SUBSURF")
+                bpy.context.object.modifiers["Subsurf_Base"].name = "Subsurf_Base"
+                bpy.context.object.modifiers["Subsurf_Base"].render_levels = 3
+                bpy.context.object.modifiers["Subsurf_Base"].levels = 3
+                bpy.context.object.modifiers["Subsurf_Base"].show_in_editmode = True
+                bpy.context.object.modifiers["Subsurf_Base"].show_on_cage = False
+                bpy.context.object.modifiers["Subsurf_Base"].subdivision_type = 'CATMULL_CLARK'
+
+        return {'FINISHED'}
+
+class HP_OT_SaveWithoutPrompt(bpy.types.Operator):
+    bl_idname = "wm.save_without_prompt"
+    bl_label = "Save without prompt"
+
+    def execute(self, context):
+        bpy.ops.wm.save_mainfile()
+        return {'FINISHED'}
+class HP_OT_RevertWithoutPrompt(bpy.types.Operator):
+    bl_idname = "wm.revert_without_prompt"
+    bl_label = "Revert without prompt"
+
+    def execute(self, context):
+        bpy.ops.wm.revert_mainfile()
+        return {'FINISHED'}
+    
+
+class HP_OT_SetCollectionCenter(bpy.types.Operator):
+    bl_idname = "view3d.hp_set_collection_center"         # unique identifier for buttons and menu items to reference.
+    bl_label = "Set Collection Center"       # display name in the interface.
+    bl_options = {'REGISTER', 'UNDO'}  # enable undo for the operator.
+
+    def execute(self, context):
+        ## 1 Save selection
+        bpy.ops.view3d.snap_cursor_to_selected()
+        #bpy.ops.view3d.snap_cursor_to_selected()
+       # bpy.ops.object.instance_offset_from_cursor()
+        return {'FINISHED'}
+
+
+
+classes = (
+    HP_OT_SaveWithoutPrompt,
+    HP_OT_RevertWithoutPrompt,
+    HP_OT_duplicate_move,
+    HP_OT_Subdivision_Toggle,
+    HP_OT_Smart_Delete,
+    HP_OT_SmartShadeSmooth,
+    HP_OT_SeparateAndSelect,
+    HP_OT_PushAndSlide,
+    HP_OT_SmartBevel,
+    HP_OT_smart_snap_origin,
+    HP_OT_extrude,
+    HP_OT_loopcut,
+    HP_OT_SetCollectionCenter
+)
+register, unregister = bpy.utils.register_classes_factory(classes)
+
+if __name__ == "__main__":
+    register()
