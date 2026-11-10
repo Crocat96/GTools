@@ -14,6 +14,10 @@ The mouse picks the side, like Blender's slide: the vertex nearest the mouse is 
 reference, and every vertex takes the rail that points most along the reference's
 direction on screen (a real edge in that direction wins over an extended one).
 
+The path is previewed in the viewport: before moving, every edge each vertex could
+take; while sliding, the edge it follows (bright), that edge's line extended both
+ways (faint, the way past the neighbour or past a border) and where it started (dot).
+
 While sliding:
 - Move the mouse: slide. Left click / Enter: confirm. Right click / Esc: cancel.
 - E: Even (every vertex moves the same distance) or proportional (default: every
@@ -26,7 +30,9 @@ In Face select mode Shift G keeps doing Push (shrink / fatten), see mesh.push_an
 
 import bmesh
 import bpy
+import gpu
 from bpy_extras import view3d_utils
+from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
 
 # A real edge in the mouse's direction is preferred over an edge extended backwards,
@@ -130,30 +136,59 @@ def factor_from_mouse(ref, project, delta):
     return delta.dot(screen) / screen.length_squared, screen.normalized()
 
 
-def apply(verts, project, guide, factor, even, ref=None):
-    """Move every vertex: origin + rail * factor (proportional), or the same world
-    distance as the reference's rail * factor (even)."""
+def plan_moves(verts, project, guide, factor, even, ref=None):
+    """[(vertex, rail or None, signed distance along the rail's direction)] for the
+    current slide: rail * factor (proportional), or the same world distance as the
+    reference's rail * factor (even)."""
     if guide is None:
-        factor = 0.0
+        return [(sv, None, 0.0) for sv in verts]
     dist = None
     if even:
-        picked = choose_rail(ref, project, guide) if (ref and guide is not None) else None
+        picked = choose_rail(ref, project, guide) if ref else None
         if picked is not None:
             dist = picked[0].length * factor
         else:
             lengths = [r.length for sv in verts for r in sv.rails]
             dist = (sum(lengths) / len(lengths) if lengths else 0.0) * factor
+    moves = []
     for sv in verts:
-        target = sv.origin
-        if factor != 0.0 and sv.rails:
-            picked = choose_rail(sv, project, guide)
-            if picked is not None:
-                rail, sign, _ = picked
-                if even:
-                    target = sv.origin + rail.normalized() * (sign * dist)
-                else:
-                    target = sv.origin + rail * (sign * factor)
+        picked = choose_rail(sv, project, guide) if sv.rails else None
+        if picked is None:
+            moves.append((sv, None, 0.0))
+            continue
+        rail, sign, _ = picked
+        moves.append((sv, rail, sign * (dist if even else rail.length * factor)))
+    return moves
+
+
+def apply(verts, project, guide, factor, even, ref=None):
+    """Move every vertex along its rail (see plan_moves)."""
+    for sv, rail, distance in plan_moves(verts, project, guide, factor, even, ref):
+        target = sv.origin if rail is None else sv.origin + rail.normalized() * distance
         sv.vert.co = sv.obj.matrix_world.inverted() @ target
+
+
+def path_lines(verts, project, guide, factor, even, ref=None):
+    """What the preview draws, in world space: (edges, extensions, origins).
+    Before the mouse moves (no guide): every rail each vertex could take.
+    While sliding: the rail each vertex follows, plus that edge's line extended both
+    ways past where the vertex is going (the path past the neighbour and past borders)."""
+    edges, extensions, origins = [], [], []
+    for sv, rail, distance in plan_moves(verts, project, guide, factor, even, ref):
+        if not sv.rails:
+            continue
+        origins.append(sv.origin)
+        if guide is None:
+            for r in sv.rails:
+                edges += [sv.origin, sv.origin + r]
+            continue
+        if rail is None:
+            continue
+        d = rail.normalized()
+        reach = max(rail.length * 1.5, abs(distance) + rail.length * 0.5)
+        edges += [sv.origin, sv.origin + rail]
+        extensions += [sv.origin - d * reach, sv.origin + d * reach]
+    return edges, extensions, origins
 
 
 def restore(verts):
@@ -174,6 +209,33 @@ def _projector(region, rv3d):
     def project(co):
         return view3d_utils.location_3d_to_region_2d(region, rv3d, co)
     return project
+
+
+RAIL_COLOR = (0.3, 0.85, 1.0, 0.95)
+LINE_COLOR = (0.3, 0.85, 1.0, 0.35)
+ORIGIN_COLOR = (1.0, 0.8, 0.2, 1.0)
+
+
+def _draw_path(op, context):
+    edges, extensions, origins = op.lines
+    if not (edges or extensions or origins):
+        return
+    gpu.state.blend_set('ALPHA')
+    gpu.state.depth_test_set('NONE')
+    line = gpu.shader.from_builtin('POLYLINE_UNIFORM_COLOR')
+    line.uniform_float("viewportSize", (context.region.width, context.region.height))
+    for segs, width, color in ((extensions, 1.5, LINE_COLOR), (edges, 2.5, RAIL_COLOR)):
+        if segs:
+            line.uniform_float("lineWidth", width)
+            line.uniform_float("color", color)
+            batch_for_shader(line, 'LINES', {"pos": [tuple(p) for p in segs]}).draw(line)
+    if origins:
+        point = gpu.shader.from_builtin('POINT_UNIFORM_COLOR')
+        gpu.state.point_size_set(7.0)
+        point.uniform_float("color", ORIGIN_COLOR)
+        batch_for_shader(point, 'POINTS', {"pos": [tuple(p) for p in origins]}).draw(point)
+        gpu.state.point_size_set(1.0)
+    gpu.state.blend_set('NONE')
 
 
 class GTOOLS_OT_smart_slide(bpy.types.Operator):
@@ -233,9 +295,16 @@ class GTOOLS_OT_smart_slide(bpy.types.Operator):
         self.delta = Vector((0.0, 0.0))
         self.factor = 0.0
         self.current_guide = None
+        self._refresh_lines()
+        self._draw_handle = bpy.types.SpaceView3D.draw_handler_add(
+            _draw_path, (self, context), 'WINDOW', 'POST_VIEW')
         context.window_manager.modal_handler_add(self)
         self._header(context)
+        context.area.tag_redraw()
         return {'RUNNING_MODAL'}
+
+    def _refresh_lines(self):
+        self.lines = path_lines(self.verts, self.project, self.current_guide, self.factor, self.even, self.ref)
 
     def _header(self, context):
         context.area.header_text_set(
@@ -252,10 +321,17 @@ class GTOOLS_OT_smart_slide(bpy.types.Operator):
             self.guide = guide
         apply(self.verts, self.project, self.current_guide, f, self.even, self.ref)
         update_meshes(self.bmeshes)
+        self._refresh_lines()
         self._header(context)
+        context.area.tag_redraw()
 
     def _finish(self, context):
+        handle = getattr(self, "_draw_handle", None)
+        if handle is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(handle, 'WINDOW')
+            self._draw_handle = None
         context.area.header_text_set(None)
+        context.area.tag_redraw()
 
     def modal(self, context, event):
         if event.type == 'MOUSEMOVE':

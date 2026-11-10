@@ -46,6 +46,86 @@ from .sharp_subtract import hint_panel_origin
 
 
 # ---------------------------------------------------------------------------
+# Safety: every change is tried on a copy first and checked before the real mesh
+# is touched (a half-built mesh, or one with edges shared by 3+ faces, can crash
+# Blender when it is drawn or beveled).
+# ---------------------------------------------------------------------------
+
+class Unsafe(Exception):
+    """This geometry can't be rebuilt safely: nothing gets changed."""
+
+
+def _boundary_loops(bm):
+    """How many separate borders (holes / open ends) the mesh has."""
+    todo = {e for e in bm.edges if e.is_boundary}
+    loops = 0
+    while todo:
+        loops += 1
+        stack = [todo.pop()]
+        while stack:
+            e = stack.pop()
+            for v in e.verts:
+                for o in v.link_edges:
+                    if o in todo:
+                        todo.discard(o)
+                        stack.append(o)
+    return loops
+
+
+def mesh_health(bm):
+    seen, duplicates = set(), 0
+    for f in bm.faces:
+        key = frozenset(f.verts)
+        if key in seen:
+            duplicates += 1
+        seen.add(key)
+    return {
+        "nonmanifold": sum(1 for e in bm.edges if len(e.link_faces) > 2),
+        "duplicates": duplicates,
+        "wire": sum(1 for e in bm.edges if not e.link_faces),
+        "loose": sum(1 for v in bm.verts if not v.link_edges),
+        "invalid": sum(1 for v in bm.verts if not all(math.isfinite(c) for c in v.co)),
+        "borders": _boundary_loops(bm),
+    }
+
+
+_HEALTH_MESSAGES = {
+    "nonmanifold": "edges shared by 3 or more faces",
+    "duplicates": "faces on top of each other",
+    "wire": "loose edges",
+    "loose": "loose vertices",
+    "invalid": "invalid vertex positions",
+    "borders": "new holes",
+}
+
+
+def health_problem(before, after):
+    """Message if the result is worse than the mesh was, else None."""
+    for key, what in _HEALTH_MESSAGES.items():
+        if after[key] > before[key]:
+            return f"the result would have {what}: cancelled, nothing was changed"
+    return None
+
+
+def _local_problem(faces):
+    """Quick check of a few faces (and their edges) after merging vertices."""
+    faces = [f for f in faces if f.is_valid]
+    seen = set()
+    for f in faces:
+        verts = list(f.verts)
+        if len(verts) < 3 or len(set(verts)) != len(verts):
+            return "faces collapse"
+        key = frozenset(verts)
+        if key in seen:
+            return "faces end up on top of each other"
+        seen.add(key)
+        for e in f.edges:
+            if len(e.link_faces) > 2:
+                return "edges end up shared by 3 or more faces"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Finding the band of faces
 # ---------------------------------------------------------------------------
 
@@ -580,16 +660,35 @@ def _end_faces(bm, profile, faces):
     return {f for e in _profile_edges(bm, profile) for f in e.link_faces if f not in faces}
 
 
+def _end_face_plan(bm, profiles, new_profiles, faces):
+    """{end face: its new vertex list} for the faces outside the strip that hold an
+    end profile. A face holding both ends (a bevel that loops back onto the same
+    n-gon) gets both replaced in one go. Raises Unsafe if a face can't take it."""
+    plan = {}
+    ends = ((profiles[0], new_profiles[0]),)
+    if profiles[-1] is not profiles[0]:
+        ends += ((profiles[-1], new_profiles[-1]),)
+    for profile, new_profile in ends:
+        for f in _end_faces(bm, profile, faces):
+            verts = _replace_run(plan.get(f, list(f.verts)), profile, new_profile)
+            if verts is None:
+                raise Unsafe("an end of the bevel meets faces it can't be rebuilt into")
+            plan[f] = verts
+    for f, verts in plan.items():
+        if len(verts) < 3 or len(set(verts)) != len(verts):
+            raise Unsafe("an end face of the bevel would collapse")
+    return plan
+
+
 def check_strip(band):
     profiles, faces = band["profiles"], band["faces"]
     for profile in profiles[1:-1]:
         if any(f not in faces for v in profile[1:-1] for f in v.link_faces):
             return "the bevel runs into other faces in the middle"
-    bm = band.get("bm")
-    for profile in (profiles[0], profiles[-1]):
-        for f in _end_faces(bm, profile, faces):
-            if _replace_run(list(f.verts), profile, profile) is None:
-                return "an end of the bevel meets faces it can't be rebuilt into"
+    try:
+        _end_face_plan(band.get("bm"), profiles, profiles, faces)
+    except Unsafe as ex:
+        return str(ex)
     return None
 
 
@@ -636,25 +735,40 @@ def resample_strip(bm, band, segments, scale=1.0):
     for profile, pts in zip(profiles, new_points):
         profile[0].co, profile[-1].co = pts[0], pts[-1]
 
-    # End faces (like an n-gon the bevel ends on): swap in the new profile.
+    # End faces (like an n-gon the bevel ends on): swap in the new profile. Faces
+    # that come out the same (same segments) are kept as they are.
     old_end_faces = set()
-    for profile, new_profile in ((profiles[0], new_profiles[0]), (profiles[-1], new_profiles[-1])):
-        for f in _end_faces(bm, profile, faces):
-            old_end_faces.add(f)
-            verts = _replace_run(list(f.verts), profile, new_profile)
-            face = bm.faces.new(verts)
-            face.material_index, face.smooth = f.material_index, f.smooth
-            face.normal_update()
-            if face.normal.dot(f.normal) < 0:
-                face.normal_flip()
+    for f, verts in _end_face_plan(bm, profiles, new_profiles, faces).items():
+        existing = bm.faces.get(verts)
+        if existing is f:  # comes out the same face
+            continue
+        if existing is not None:
+            raise Unsafe("an end face of the bevel would land on another face")
+        old_end_faces.add(f)
+        face = bm.faces.new(verts)
+        face.material_index, face.smooth = f.material_index, f.smooth
+        face.normal_update()
+        if face.normal.dot(f.normal) < 0:
+            face.normal_flip()
 
-    new_faces = []
+    new_faces, kept = [], set()
     for r, (a, b) in enumerate(zip(new_profiles, new_profiles[1:])):
-        row = [bm.faces.new((a[k], a[k + 1], b[k + 1], b[k])) for k in range(segments)]
+        row = []
+        for k in range(segments):
+            verts = (a[k], a[k + 1], b[k + 1], b[k])
+            existing = bm.faces.get(verts)
+            if existing is not None:
+                if existing not in faces:
+                    raise Unsafe("the new bevel would land on faces outside it")
+                kept.add(existing)  # an old strip face that stays exactly the same
+                row.append(existing)
+            else:
+                row.append(bm.faces.new(verts))
         row[0].normal_update()
-        if row[0].normal.dot(ref_normals[r]) < 0:
+        if row[0] not in kept and row[0].normal.dot(ref_normals[r]) < 0:
             for f in row:
-                f.normal_flip()
+                if f not in kept:
+                    f.normal_flip()
         new_faces += row
     for f in new_faces:
         f.material_index, f.smooth = material, smooth
@@ -663,7 +777,7 @@ def resample_strip(bm, band, segments, scale=1.0):
     # (unless the new faces still use them) and the old inner vertices.
     new_edges = {e for f in new_faces for e in f.edges}
     old_across = [e for p in profiles for e in _profile_edges(bm, p) if e not in new_edges]
-    bmesh.ops.delete(bm, geom=list(faces | old_end_faces), context='FACES_ONLY')
+    bmesh.ops.delete(bm, geom=list((faces - kept) | old_end_faces), context='FACES_ONLY')
     old_across = [e for e in old_across if e.is_valid]
     if old_across:
         bmesh.ops.delete(bm, geom=old_across, context='EDGES')
@@ -852,19 +966,12 @@ def _segments_across(region):
     return best or 1
 
 
-def rebevel_preview(band, segments, width=None):
-    """Edges (local coordinates, pairs) of what re-beveling would make: done on a
-    copy of the mesh with BMesh's own bevel, which the real one matches."""
-    bm = band["bm"]
-    bm.verts.index_update()
-    copy = bm.copy()
-    copy.verts.ensure_lookup_table()
+def unbevel(bm, region, targets):
+    """Move every bevel vertex back onto the sharp edge or corner it rounded (merging
+    the ones that meet) and return the sharp edges to bevel again. Raises Unsafe if
+    the result isn't clean enough to hand to Blender's bevel."""
     key = lambda co: tuple(round(c, 5) for c in co)
-    targets = {copy.verts[v.index]: t for v, t in band["targets"].items()}
-    region_idx = {f.index for f in band["faces"]}
-    bm.faces.index_update()
-    copy.faces.ensure_lookup_table()
-    region = {copy.faces[i] for i in region_idx}
+    # The edges to bevel again: the bevel's borders, which become the sharp edges.
     edge_keys = set()
     for f in region:
         for e in f.edges:
@@ -875,67 +982,89 @@ def rebevel_preview(band, segments, width=None):
     groups = {}
     for v, t in targets.items():
         groups.setdefault(key(t), (t, []))[1].append(v)
+    survivors = []
     for t, verts in groups.values():
+        verts = [v for v in verts if v.is_valid]
+        if not verts:
+            continue
         if len(verts) > 1:
-            bmesh.ops.pointmerge(copy, verts=verts, merge_co=t)
+            bmesh.ops.pointmerge(bm, verts=verts, merge_co=t)
         else:
             verts[0].co = t
-    edges = [e for e in copy.edges if frozenset((key(e.verts[0].co), key(e.verts[1].co))) in edge_keys]
-    lines = []
-    if edges and segments == 0:
-        lines = [(e.verts[0].co.copy(), e.verts[1].co.copy()) for e in edges]
-    elif edges:
-        result = bmesh.ops.bevel(copy, geom=edges, offset=width or band["width"], offset_type='OFFSET',
-                                 segments=segments, profile=0.5, affect='EDGES', clamp_overlap=False)
-        seen = set()
+        survivors += [v for v in verts if v.is_valid]
+    touched = {f for v in survivors for f in v.link_faces}
+    problem = _local_problem(touched)
+    if problem:
+        raise Unsafe(f"this doesn't look like a bevel that can be rebuilt ({problem})")
+    edges = [e for e in {e for f in touched for e in f.edges}
+             if frozenset((key(e.verts[0].co), key(e.verts[1].co))) in edge_keys]
+    if not edges:
+        raise Unsafe("couldn't rebuild the sharp edges of this bevel")
+    for e in edges:
+        if not 1 <= len(e.link_faces) <= 2 or e.calc_length() < 1e-6:
+            raise Unsafe("the sharp edges under this bevel aren't clean (loose, shared or zero length)")
+    return edges
+
+
+def bevel_edges(bm, edges, segments, width):
+    """BMesh's bevel with the settings Loop Resample uses (preview and result alike)."""
+    return bmesh.ops.bevel(bm, geom=edges, offset=width, offset_type='OFFSET', segments=segments,
+                           profile=0.5, affect='EDGES', clamp_overlap=False)
+
+
+def _copy_band(band):
+    """A copy of the mesh and the band's region / targets pointing into it."""
+    bm = band["bm"]
+    bm.verts.index_update()
+    bm.faces.index_update()
+    copy = bm.copy()
+    copy.verts.ensure_lookup_table()
+    copy.faces.ensure_lookup_table()
+    targets = {copy.verts[v.index]: t for v, t in band["targets"].items()}
+    region = {copy.faces[f.index] for f in band["faces"]}
+    return copy, region, targets
+
+
+def rebevel_preview(band, segments, width=None):
+    """Edges (local coordinates, pairs) of what re-beveling would make: done on a
+    copy of the mesh with the same un-bevel and bevel as the real one.
+    Raises Unsafe if it can't be done safely."""
+    copy, region, targets = _copy_band(band)
+    try:
+        edges = unbevel(copy, region, targets)
+        if segments == 0:
+            return [(e.verts[0].co.copy(), e.verts[1].co.copy()) for e in edges]
+        result = bevel_edges(copy, edges, segments, width or band["width"])
+        lines, seen = [], set()
         for f in result.get("faces", []):
             for e in f.edges:
                 if e not in seen:
                     seen.add(e)
                     lines.append((e.verts[0].co.copy(), e.verts[1].co.copy()))
-    copy.free()
-    return lines
+        return lines
+    finally:
+        copy.free()
 
 
-def rebevel(context, band, segments, width=None):
+def rebevel(bm, band, segments, width=None):
     """Un-bevel the network (every bevel vertex back onto its sharp edge or corner),
-    then bevel those edges again with the new number of segments."""
-    bm = band["bm"]
-    obj = context.active_object
-    targets = band["targets"]
-    key = lambda co: tuple(round(c, 5) for c in co)
-    # The edges to bevel again: the bevel's borders, which become the sharp edges.
-    rails = [e for f in band["faces"] for e in f.edges if any(g not in band["faces"] for g in e.link_faces)]
-    edge_keys = set()
-    for e in rails:
-        a, b = (key(targets[v]) for v in e.verts)
-        if a != b:
-            edge_keys.add(frozenset((a, b)))
-    groups = {}
-    for v, t in targets.items():
-        groups.setdefault(key(t), (t, []))[1].append(v)
-    for t, verts in groups.values():
-        if len(verts) > 1:
-            bmesh.ops.pointmerge(bm, verts=verts, merge_co=t)
-        else:
-            verts[0].co = t
-    # Select the rebuilt sharp edges and bevel them.
+    then bevel those edges again with the new number of segments. Selects the new
+    bevel faces (or the sharp edges, for 0 segments) and returns 'FACE' or 'EDGE'."""
+    edges = unbevel(bm, band["faces"], band["targets"])
     for elem in list(bm.verts) + list(bm.edges) + list(bm.faces):
         elem.select = False
-    found = 0
-    for e in bm.edges:
-        if frozenset((key(e.verts[0].co), key(e.verts[1].co))) in edge_keys:
-            e.select = True
-            found += 1
-    bmesh.update_edit_mesh(obj.data, loop_triangles=True, destructive=True)
-    if not found:
-        return False
-    bpy.ops.mesh.select_mode(type='EDGE')
     if segments == 0:  # un-bevel only: the sharp edges stay selected
-        return True
-    bpy.ops.mesh.bevel(offset_type='OFFSET', offset=width or band["width"], segments=segments, profile=0.5,
-                       affect='EDGES', clamp_overlap=False)
-    return True
+        for e in edges:
+            e.select = True
+        bm.select_mode = {'EDGE'}
+        bm.select_flush_mode()
+        return 'EDGE'
+    result = bevel_edges(bm, edges, segments, width or band["width"])
+    for f in result.get("faces", []):
+        f.select = True
+    bm.select_mode = {'FACE'}
+    bm.select_flush(True)
+    return 'FACE'
 
 
 # ---------------------------------------------------------------------------
@@ -1019,6 +1148,42 @@ def _draw_pixel(op, context):
 # Operator
 # ---------------------------------------------------------------------------
 
+def detect(bm, flip=False):
+    """(band, None) for what the selection is, or (None, message)."""
+    band, message = find_band(bm)
+    if band is not None:
+        if band["kind"] == 'BEVEL' and flip:
+            band["profiles"], band["alt_profiles"] = band["alt_profiles"], band["profiles"]
+        if band["kind"] == 'LOOP':
+            message = check_band(band)
+        elif band["kind"] == 'BEVEL':
+            message = check_strip(band)
+        if message and band["kind"] in {'LOOP', 'BEVEL'}:
+            # Not a clean cylinder / strip (e.g. the ring of a beveled box, which
+            # meets other bevels at its corners): try it as a bevel network.
+            network, _net_message = find_network(bm, set(band["faces"]))
+            if network is not None:
+                band, message = network, None
+    if message:
+        return None, message
+    return band, None
+
+
+def _backup(bm):
+    me = bpy.data.meshes.new("GT_LoopResample_backup")
+    copy = bm.copy()
+    try:
+        copy.to_mesh(me)
+    finally:
+        copy.free()
+    return me
+
+
+def _restore(bm, me):
+    bm.clear()
+    bm.from_mesh(me)
+
+
 class GTOOLS_OT_loop_resample(bpy.types.Operator):
     """Change how many sides the selected loop of faces has, keeping its shape (scroll to set it)"""
     bl_idname = "mesh.gtools_loop_resample"
@@ -1041,41 +1206,72 @@ class GTOOLS_OT_loop_resample(bpy.types.Operator):
 
     def _band(self, context):
         bm = bmesh.from_edit_mesh(context.active_object.data)
-        band, message = find_band(bm)
-        if band is not None:
-            if band["kind"] == 'BEVEL' and self.flip:
-                band["profiles"], band["alt_profiles"] = band["alt_profiles"], band["profiles"]
-            if band["kind"] == 'LOOP':
-                message = check_band(band)
-            elif band["kind"] == 'BEVEL':
-                message = check_strip(band)
-            if message and band["kind"] in {'LOOP', 'BEVEL'}:
-                # Not a clean cylinder / strip (e.g. the ring of a beveled box, which
-                # meets other bevels at its corners): try it as a bevel network.
-                network, net_message = find_network(bm, set(band["faces"]))
-                if network is not None:
-                    band, message = network, None
+        band, message = detect(bm, self.flip)
         return bm, band, message
 
+    def _run(self, bm):
+        """Find the band in bm and rebuild it. Returns (select mode, message):
+        a message means nothing could be done."""
+        band, message = detect(bm, self.flip)
+        if message:
+            return None, message
+        try:
+            if band["kind"] == 'LOOP':
+                resample_band(bm, band, max(self.sides, 3))
+                return 'FACE', None
+            if band["kind"] == 'BEVEL':
+                resample_strip(bm, band, max(self.sides, 0), self.radius)
+                return 'FACE', None
+            return rebevel(bm, band, max(self.sides, 0), band["width"] * self.radius), None
+        except Unsafe as ex:
+            return None, str(ex)
+
     def execute(self, context):
-        bm, band, message = self._band(context)
+        obj = context.active_object
+        bm = bmesh.from_edit_mesh(obj.data)
+        before = mesh_health(bm)
+        # 1. Dry run on a copy: the real mesh is only touched if this works and the
+        #    result is clean.
+        trial = bm.copy()
+        try:
+            mode, message = self._run(trial)
+            if not message:
+                message = health_problem(before, mesh_health(trial))
+        except Exception as ex:
+            print(f"G-Tools Loop Resample (dry run): {ex!r}")
+            message = "this geometry can't be rebuilt (see the console): nothing was changed"
+        finally:
+            trial.free()
         if message:
             self.report({'WARNING'}, f"Loop Resample: {message}")
             return {'CANCELLED'}
-        if band["kind"] == 'LOOP':
-            resample_band(bm, band, max(self.sides, 3))
-        elif band["kind"] == 'BEVEL':
-            resample_strip(bm, band, max(self.sides, 0), self.radius)
-        else:
-            if not rebevel(context, band, max(self.sides, 0), band["width"] * self.radius):
-                self.report({'WARNING'}, "Loop Resample: couldn't rebuild the sharp edges of this bevel")
-                return {'CANCELLED'}
-            return {'FINISHED'}
-        bmesh.update_edit_mesh(context.active_object.data, loop_triangles=True, destructive=True)
+        # 2. The real thing, with a backup in case something still goes wrong.
+        backup = _backup(bm)
+        try:
+            mode, message = self._run(bm)
+            if message:
+                raise Unsafe(message)
+        except Exception as ex:
+            print(f"G-Tools Loop Resample: {ex!r}")
+            _restore(bm, backup)
+            bmesh.update_edit_mesh(obj.data, loop_triangles=True, destructive=True)
+            self.report({'ERROR'}, "Loop Resample: failed, the mesh was restored")
+            return {'CANCELLED'}
+        finally:
+            bpy.data.meshes.remove(backup)
+        bmesh.update_edit_mesh(obj.data, loop_triangles=True, destructive=True)
+        if mode == 'EDGE':  # un-beveled: the sharp edges are selected
+            context.tool_settings.mesh_select_mode = (False, True, False)
         return {'FINISHED'}
 
     def invoke(self, context, event):
         bm, band, message = self._band(context)
+        if not message and band["kind"] == 'REBEVEL':
+            # Un-beveling must be clean before anything is previewed or beveled.
+            try:
+                rebevel_preview(band, 0)
+            except Unsafe as ex:
+                message = str(ex)
         if message:
             self.report({'WARNING'}, f"Loop Resample: {message}")
             return {'CANCELLED'}
