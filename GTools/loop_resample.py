@@ -810,8 +810,16 @@ def _planes(faces):
 
 
 def _target(v, planes, limit):
-    """Where the vertex sat before the bevel: on the edge (two planes) or the corner
-    (three planes) it rounded, or None. Planes it is within `limit` of count."""
+    """(point, line): where the vertex sat before the bevel, on the corner (three
+    planes, line None) or the sharp edge (two planes, line = (point, direction)) it
+    rounded; (None, None) if neither. Planes it is within `limit` of count."""
+    point = _target_point(v, planes, limit)
+    if point is None or not isinstance(point, tuple):
+        return point, None
+    return point
+
+
+def _target_point(v, planes, limit):
     near = sorted(((abs((v - p).dot(n)), p, n) for p, n in planes), key=lambda x: x[0])
     near = [x for x in near if x[0] <= limit]
     chosen = []
@@ -840,8 +848,73 @@ def _target(v, planes, limit):
             base = m.inverted() @ Vector((p1.dot(n1), p2.dot(n2), v.dot(direction)))
         except ValueError:
             return None
-        return base
+        return base, (base.copy(), direction)
     return None
+
+
+def _align_profiles(region, targets, lines, width):
+    """Every vertex of one profile (the chain across the bevel) goes back to the same
+    point. Projecting each vertex on its own onto the sharp edge only works when the
+    profile is square to the edge; at a slanted end (an open border meeting a slanted
+    edge, walls that lean) the vertices would land on different points, leaving tiny
+    sharp edges that make the new bevel twist."""
+    from mathutils.geometry import intersect_line_line
+    parent = {v: v for v in targets}
+
+    def find(v):
+        while parent[v] is not v:
+            parent[v] = parent[parent[v]]
+            v = parent[v]
+        return v
+
+    # Edges across the bevel: their two ends go back to (nearly) the same point.
+    for f in region:
+        for e in f.edges:
+            a, b = e.verts
+            if (targets[a] - targets[b]).length < 0.5 * e.calc_length():
+                ra, rb = find(a), find(b)
+                if ra is not rb:
+                    parent[ra] = rb
+    groups = {}
+    for v in targets:
+        groups.setdefault(find(v), []).append(v)
+
+    out = dict(targets)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        corners = [v for v in group if lines[v] is None]
+        if corners:
+            # Touches a corner (three planes): all of it goes to that corner, if they agree.
+            first = targets[corners[0]]
+            if all((targets[v] - first).length <= width * 0.05 for v in corners):
+                for v in group:
+                    out[v] = first
+            continue
+        base, d = lines[group[0]]
+        same_line = all(abs(lines[v][1].dot(d)) > 0.999 and
+                        ((lines[v][0] - base) - d * (lines[v][0] - base).dot(d)).length <= width * 0.05
+                        for v in group)
+        if not same_line:
+            continue
+        # Where the profile was: edges of the faces around it (not the bevel's) carried
+        # on until they meet the sharp edge, e.g. the open border a bevel ends on.
+        hits = []
+        for v in group:
+            for e in v.link_edges:
+                if any(f in region for f in e.link_faces):
+                    continue
+                other = e.other_vert(v)
+                along = other.co - v.co
+                if along.length < 1e-9 or abs(along.normalized().dot(d)) > 0.99:
+                    continue
+                hit = intersect_line_line(v.co, other.co, base, base + d)
+                if hit and (hit[0] - hit[1]).length <= max(width * 0.05, 1e-6):
+                    hits.append(hit[1])
+        point = (sum(hits, Vector()) / len(hits)) if hits else sum((targets[v] for v in group), Vector()) / len(group)
+        for v in group:
+            out[v] = point
+    return out
 
 
 def find_network(bm, faces):
@@ -862,7 +935,11 @@ def _network(bm, faces, careful):
         return {f for e in {e for f in region for e in f.edges} for f in e.link_faces if f not in region}
 
     def narrow(f):
-        return min(e.calc_length() for e in f.edges)
+        # How wide the face really is: area over half its perimeter (a thin strip gives
+        # its width). Not its shortest edge: a cap n-gon that holds the bevel's short
+        # profile edges would look as thin as the bevel and get swallowed into it.
+        perimeter = sum(e.calc_length() for e in f.edges)
+        return 2.0 * f.calc_area() / perimeter if perimeter > 0 else 0.0
 
     # How thin a bevel face is here (its segments): faces around the selection that
     # are just as thin are more bevel (e.g. the bevel going down from a corner); the
@@ -891,18 +968,21 @@ def _network(bm, faces, careful):
         planes = _planes(flat_faces(around(region)))
         if len(planes) < 2:
             return None, "select a loop (cylinder), a bevel strip or the faces of a bevel"
-        rails = [v for f in region for v in f.verts
-                 if any(g not in region for g in v.link_faces)]
         gaps = []
-        for v in rails:
-            dists = sorted(((abs((v.co - p).dot(n)), n) for p, n in planes), key=lambda x: x[0])
-            if len(dists) > 1 and dists[0][0] < 1e-4:
-                own = dists[0][1]
+        for f, e, g in _side_borders(region):
+            own = g.normal
+            for v in e.verts:
+                dists = sorted(((abs((v.co - p).dot(n)), n) for p, n in planes), key=lambda x: x[0])
                 # The nearest plane the vertex is NOT on (a vertex on two faces' corner
-                # sits on both: that says nothing about the width).
-                other = next(((d, n) for d, n in dists[1:] if d > 1e-4 and own.cross(n).length > 1e-3), None)
-                if other is not None:
-                    gaps.append(other[0] / own.cross(other[1]).length)  # along the face to the old edge
+                # sits on both: that says nothing about the width), meeting this side
+                # along the border edge (the sharp edge the bevel rounded).
+                for d, n in dists:
+                    if d <= 1e-4 or own.cross(n).length <= 1e-3:
+                        continue
+                    line = own.cross(n).normalized()
+                    if abs(line.dot((e.verts[1].co - e.verts[0].co).normalized())) > 0.95:
+                        gaps.append(d / own.cross(n).length)  # along the face to the old edge
+                    break
         if width is None:  # measured once, on the selection itself
             if not gaps:
                 return None, "couldn't find the faces the bevel sits between"
@@ -931,24 +1011,65 @@ def _network(bm, faces, careful):
             for g in e.link_faces:
                 if g not in region and abs(f.normal.dot(g.normal)) > 0.9999:
                     return None, "this doesn't look like a bevel (it carries straight on into the faces around it)"
-    targets = {}
+    flat = [f for f in flat_faces(around(region)) if f.normal.length > 0.5]
+    flat_set = set(flat)
+    targets, lines = {}, {}
     for v in {v for f in region for v in f.verts}:
-        t = _target(v.co, planes, limit)
+        # Only the planes of the faces around this part of the bevel: a plane from
+        # elsewhere on the object can pass close by (the walls of a star's other
+        # points, at its notches) and would pin the vertex to a corner that isn't there.
+        local = _local_planes(v, region, flat_set, width * 2.0)
+        t, line = _target(v.co, local if len(local) >= 2 else planes, limit)
         if t is None:
             return None, "this doesn't look like a bevel (couldn't find the sharp edges it rounds)"
-        targets[v] = t
+        targets[v], lines[v] = t, line
+    targets = _align_profiles(region, targets, lines, width)
     return {"kind": 'REBEVEL', "faces": region, "targets": targets, "width": width, "bm": bm,
             "segments": _segments_across(region)}, None
+
+
+def _local_planes(v, region, flat_set, radius):
+    """Planes of the flat faces next to the bevel faces around v (walking the bevel
+    faces that come within `radius` of v)."""
+    start = [f for f in v.link_faces if f in region]
+    seen, todo, faces = set(start), list(start), []
+    while todo:
+        f = todo.pop()
+        for e in f.edges:
+            for g in e.link_faces:
+                if g in flat_set:
+                    faces.append(g)
+                elif g in region and g not in seen and \
+                        min((u.co - v.co).length for u in g.verts) <= radius:
+                    seen.add(g)
+                    todo.append(g)
+    return _planes(faces)
+
+
+def _side_borders(region):
+    """(bevel face, edge, outside face) along the bevel's sides: where it meets the
+    faces it rounds into. Not its ends: an end cap (the n-gon a bevel stops on) stands
+    across the bevel faces, while a side runs almost along the bevel face next to it."""
+    out = []
+    for f in region:
+        for e in f.edges:
+            if e.calc_length() < 1e-9:
+                continue
+            for g in e.link_faces:
+                if g not in region and g.normal.length > 0.5 and abs(f.normal.dot(g.normal)) > 0.2:
+                    out.append((f, e, g))
+    return out
 
 
 def _segments_across(region):
     """How many segments the bevel has: faces crossed from one side to the other."""
     best = None
+    sides = {e for _f, e, _g in _side_borders(region)}
     for f in region:
         if len(f.verts) != 4:
             continue
         for loop in f.loops:
-            if not any(g not in region for g in loop.edge.link_faces):
+            if loop.edge not in sides:
                 continue
             count, l = 1, loop
             for _ in range(256):
@@ -1007,9 +1128,12 @@ def unbevel(bm, region, targets):
 
 
 def bevel_edges(bm, edges, segments, width):
-    """BMesh's bevel with the settings Loop Resample uses (preview and result alike)."""
+    """BMesh's bevel with the settings Loop Resample uses (preview and result alike).
+    loop_slide like Blender's Bevel operator (on by default): where a bevel ends on
+    faces that aren't square to it, its corners slide along their edges, which is
+    how the original bevel was made, so the same segments give back the same bevel."""
     return bmesh.ops.bevel(bm, geom=edges, offset=width, offset_type='OFFSET', segments=segments,
-                           profile=0.5, affect='EDGES', clamp_overlap=False)
+                           profile=0.5, affect='EDGES', clamp_overlap=False, loop_slide=True)
 
 
 def _copy_band(band):

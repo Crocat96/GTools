@@ -557,6 +557,7 @@ class GTOOLS_AddonPreferences(bpy.types.AddonPreferences):
         items=(
             ('GTOOLS', "G-Tools Hotkeys", ""),
             ('BLENDER', "Disabled Blender Hotkeys", ""),
+            ('TOOLS', "Tools Guide", "What every tool does and how to use it"),
         ),
         default='GTOOLS',
     )
@@ -589,6 +590,9 @@ class GTOOLS_AddonPreferences(bpy.types.AddonPreferences):
         if self.tab == 'GTOOLS':
             row.operator(GTOOLS_OT_restore_keymaps.bl_idname, text="", icon='LOOP_BACK')
             self._draw_gtools(context, layout.column())
+        elif self.tab == 'TOOLS':
+            from .tools_guide import draw_guide
+            draw_guide(layout.column(), context, self.search)
         else:
             self._draw_disabled(context, layout.column())
 

@@ -35,17 +35,18 @@ Herramientas propias (prefijo de clases `GTOOLS_`, operadores `*.gtools_*`):
 | `smart_cut` | Dibuja una línea/polilínea y corta. Edit Mode: bisect destructivo. Object Mode: cutter caja + Sharp Subtract. Tiene WorkSpaceTools. |
 | `sharp_subtract` | Boolean vivo con Geometry Nodes (grupo `GT_SharpSubtract`), un modificador por cutter, aristas de corte en sharp. |
 | `edge_bevel` | Click en arista en Object Mode → bevel no destructivo hecho como boolean (grupo `GT_Subtract`), Alt = loop entero. |
-| `loop_resample` | Cambia el nº de lados de un loop manteniendo la forma; también segmentos/radio de bevels (estilo MESHmachine). Tipos: `LOOP`, `BEVEL` (strip) y `REBEVEL` (red con esquinas: un-bevel con `pointmerge` + `bmesh.ops.bevel`). **Transaccional** (ver Convenciones). |
+| `loop_resample` | Cambia el nº de lados de un loop manteniendo la forma; también segmentos/radio de bevels (estilo MESHmachine). Tipos: `LOOP`, `BEVEL` (strip) y `REBEVEL` (red con esquinas: un-bevel con `pointmerge` + `bmesh.ops.bevel` con `loop_slide=True` como el operador de Blender). **Transaccional** (ver Convenciones). REBEVEL debe reconstruir *exactamente* el bevel original con los mismos segmentos (comprobarlo en casos nuevos): planos **locales** por vértice (`_local_planes`), todos los vértices de un perfil al mismo punto (`_align_profiles`, prolongando aristas del borde hasta la arista viva), ancho y segmentos medidos solo en los lados (`_side_borders`, no en tapas), y "grosor" de cara = 2·área/perímetro. |
 | `curve_align` | Ajusta vértices a una curva Bezier o caras a un patch Bezier, con puntos de control editables. |
 | `modifier_scroll` | Recorre con la rueda los booleanos del objeto activo (estilo HardOps). |
 | `quick_decal` | Aplana un objeto sobre otro como decal conservando normales (grupo `GT_Decal`). |
 | `panel_line` | Panel line estilo DECALmachine desde un cutter (grupo `GT_PanelLine_strip`). |
 | `ornament` | Shift A → curva con molduras por Geometry Nodes (`GT_Ornament_v2`, perfiles `GT_Profile_*`). |
 | `curve_patch` | Pie Select (Object Mode, solo con 2–4 curvas seleccionadas) → objeto "Patch" con parche de Coons vivo (grupo `GT_CurvePatch`): 4 curvas = parche, 3 = triangular (lado Top colapsado), 2 = loft reglado. Orientación (Bottom/Top/Left/Right + Reverse) calculada al crear desde los extremos; editable en el modificador. Solo usa el primer spline. |
-| `smart_slide` | Preview en POST_VIEW: antes de mover, todas las aristas posibles; deslizando, la arista seguida + su línea prolongada + origen. Shift G en Edit Mode (vía `mesh.push_and_slide`, que en modo cara sigue haciendo shrink/fatten). Vertex + edge slide en uno: cada vértice sigue una arista hacia un vecino no seleccionado tratada como línea infinita (pasa del vecino y, si no hay arista hacia el ratón, sigue la opuesta prolongada: sale por los bordes). E = Even, Shift = precisión, Ctrl = pasos de 0.1. Lógica separada de la proyección (`project` inyectable) para poder testearla. |
+| `smart_slide` | En modo cara = **push**: cada vértice sigue su arista más alineada con la normal de las caras (línea infinita); por defecto la cara queda plana y paralela (avance = distancia / cos), E = misma distancia por arista; sin arista guía (cos < 0.25) va por la normal. Preview en POST_VIEW: antes de mover, todas las aristas posibles; deslizando, la arista seguida + su línea prolongada + origen. Shift G en Edit Mode (vía `mesh.push_and_slide`, que en modo cara sigue haciendo shrink/fatten). Vertex + edge slide en uno: cada vértice sigue una arista hacia un vecino no seleccionado tratada como línea infinita (pasa del vecino y, si no hay arista hacia el ratón, sigue la opuesta prolongada: sale por los bordes). E = Even, Shift = precisión, Ctrl = pasos de 0.1. Lógica separada de la proyección (`project` inyectable) para poder testearla. |
 | `xray_select` | Box/lasso/circle con X-ray temporal. |
 | `keymaps` + `keymap_data` | Atajos configurables en las preferencias del add-on (ver abajo). |
 | `cheatsheet` | Panel "G-Tools" en la barra lateral (N) con los atajos activos. |
+| `tools_guide` | Pestaña "Tools Guide" de las preferencias: `GUIDE` = texto de cada herramienta (cómo se usa / qué hace), con buscador. **Al añadir o cambiar una herramienta, actualizar aquí su entrada.** |
 
 Heredados de HEAVYPOLY (`HP_*`): pies de selección, vista, shading, booleanos, añadir y guardar,
 operadores "smart" (extrude, bevel, delete, subdivision toggle…), dibujar primitivas, panel de render.
@@ -76,7 +77,8 @@ operadores "smart" (extrude, bevel, delete, subdivision toggle…), dibujar prim
   `context.temp_override(window=, area=<VIEW_3D>, region=<WINDOW>)`. Los `draw()` de menús se prueban con un layout falso.
 - Crashes: ejecutar cada caso en **su propio proceso** de Blender (un segfault solo mata ese caso) y revisar la
   salud de la malla tras cada operación. Casos de estrés para Loop Resample: bevels convexos/cóncavos (L, estrella,
-  ranura en U, cavidad), bevel 1 segmento, bevels solapados, banda de esfera/toro (no son bevel: deben cancelar).
+  ranura en U, cavidad), bevel 1 segmento, bevels solapados, banda de esfera/toro (no son bevel: deben cancelar),
+  esquina interior recta y **esquina de bandeja con paredes inclinadas** (ángulos obtusos, extremo abierto en diagonal).
 - Modales y dibujo GPU de verdad (no funcionan en `--background`): Blender con interfaz +
   `--enable-event-simulate`, un `bpy.app.timers` que va paso a paso con `window.event_simulate(...)`
   (MOUSEMOVE / LEFTMOUSE / WHEELUPMOUSE / RET) y `bpy.ops.wm.quit_blender()` al final. Abre una ventana unos segundos.

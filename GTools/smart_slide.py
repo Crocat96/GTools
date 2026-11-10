@@ -25,7 +25,12 @@ While sliding:
 - Shift: precision. Ctrl: factor in steps of 0.1.
 After confirming, the redo panel takes an exact factor.
 
-In Face select mode Shift G keeps doing Push (shrink / fatten), see mesh.push_and_slide.
+Push (Face select mode): the selected faces are pushed along their edges. Each vertex
+follows its edge that runs most along the faces' normal, as an infinite line, so the
+faces ride up or down converging / diverging edges. By default the faces stay flat
+and parallel (each vertex goes as far along its edge as the push needs); E switches
+to Even (the same distance along every edge). A vertex with no edge near the normal
+moves straight along the normal.
 """
 
 import bmesh
@@ -45,19 +50,20 @@ BACKWARD_WEIGHT = 0.8
 # ---------------------------------------------------------------------------
 
 class SlideVert:
-    __slots__ = ("obj", "bm", "vert", "origin", "rails")
+    __slots__ = ("obj", "bm", "vert", "origin", "rails", "normal")
 
-    def __init__(self, obj, bm, vert, origin, rails):
+    def __init__(self, obj, bm, vert, origin, rails, normal=None):
         self.obj = obj
         self.bm = bm
         self.vert = vert
         self.origin = origin  # world space
         self.rails = rails    # world-space vectors to each unselected neighbour
+        self.normal = normal  # world space, from the selected faces around it (push)
 
 
 def collect(objects):
-    """Selected, visible vertices of the meshes in Edit Mode, with their rails.
-    Returns (verts, bmeshes) where bmeshes is {obj: bm}."""
+    """Selected, visible vertices of the meshes in Edit Mode, with their rails and the
+    normal of the selected faces around them. Returns (verts, bmeshes), bmeshes = {obj: bm}."""
     verts, bmeshes = [], {}
     for obj in objects:
         if obj.type != 'MESH' or obj.mode != 'EDIT':
@@ -66,6 +72,7 @@ def collect(objects):
         bm.verts.ensure_lookup_table()
         bmeshes[obj] = bm
         mw = obj.matrix_world
+        normal_matrix = mw.inverted_safe().transposed().to_3x3()
         for v in bm.verts:
             if not v.select or v.hide:
                 continue
@@ -80,8 +87,97 @@ def collect(objects):
                 vec = mw @ other.co - origin
                 if vec.length > 1e-9:
                     rails.append(vec)
-            verts.append(SlideVert(obj, bm, v, origin, rails))
+            normal = Vector()
+            for f in v.link_faces:
+                if f.select and not f.hide:
+                    normal += (normal_matrix @ f.normal).normalized()
+            verts.append(SlideVert(obj, bm, v, origin, rails,
+                                   normal.normalized() if normal.length > 1e-9 else None))
     return verts, bmeshes
+
+
+# ---------------------------------------------------------------------------
+# Push (faces): every vertex follows its edge that runs most along the faces' normal
+# ---------------------------------------------------------------------------
+
+# An edge leaning more than this from the normal (cos ~76 degrees) isn't a guide: the
+# vertex is pushed straight along the normal instead.
+PUSH_MIN_COS = 0.25
+
+
+def push_guide(sv):
+    """(unit direction pointing out of the faces, cos to the normal, rail or None) for
+    this vertex, or None if it has no selected face around it."""
+    n = sv.normal
+    if n is None:
+        return None
+    best = None
+    for rail in sv.rails:
+        d = rail.normalized()
+        c = d.dot(n)
+        if best is None or abs(c) > abs(best[1]):
+            best = (d, c, rail)
+    if best is None or abs(best[1]) < PUSH_MIN_COS:
+        return n.copy(), 1.0, None
+    d, c, rail = best
+    if c < 0:
+        d, c = -d, -c
+    return d, c, rail
+
+
+def plan_push(verts, distance, even):
+    """[(vertex, unit direction or None, travel along it, rail or None)].
+    Flat (default): the faces move `distance` along their normal and stay parallel,
+    each vertex going as far along its edge as that takes (edges that spread apart
+    make the faces grow, edges that close in make them shrink). Even: every vertex
+    moves `distance` along its own edge."""
+    out = []
+    for sv in verts:
+        g = push_guide(sv)
+        if g is None:
+            out.append((sv, None, 0.0, None))
+            continue
+        d, c, rail = g
+        out.append((sv, d, distance if even else distance / c, rail))
+    return out
+
+
+def apply_push(verts, distance, even):
+    for sv, d, travel, _rail in plan_push(verts, distance, even):
+        target = sv.origin if d is None else sv.origin + d * travel
+        sv.vert.co = sv.obj.matrix_world.inverted() @ target
+
+
+def push_lines(verts, distance, even):
+    """Preview for push: (edges, extensions, origins) like path_lines."""
+    edges, extensions, origins = [], [], []
+    for sv, d, travel, rail in plan_push(verts, distance, even):
+        if d is None:
+            continue
+        origins.append(sv.origin)
+        size = rail.length if rail is not None else max((r.length for r in sv.rails), default=1.0)
+        reach = max(size * 1.5, abs(travel) + size * 0.5)
+        if rail is not None:
+            edges += [sv.origin, sv.origin + rail]
+        extensions += [sv.origin - d * reach, sv.origin + d * reach]
+    return edges, extensions, origins
+
+
+_AXES = (Vector((1, 0, 0)), Vector((0, 1, 0)), Vector((0, 0, 1)))
+
+
+def push_from_mouse(ref, project, delta):
+    """Push distance (world units, along the normal) for a mouse offset: dragging along
+    the normal as seen on screen; if the normal points at the view, dragging up."""
+    a = project(ref.origin)
+    b = project(ref.origin + ref.normal)
+    if a is not None and b is not None and (b - a).length > 5.0:
+        s = b - a
+        return delta.dot(s) / s.length_squared
+    if a is None:
+        return 0.0
+    ppu = max(((project(ref.origin + ax) or a) - a).length for ax in _AXES) or 100.0
+    return delta.y / ppu
 
 
 def _screen_vec(project, origin, rail):
@@ -109,10 +205,10 @@ def choose_rail(sv, project, guide):
     return best[1], best[2], best[3]
 
 
-def nearest(verts, project, point):
+def nearest(verts, project, point, need_rails=True):
     best = None
     for sv in verts:
-        if not sv.rails:
+        if need_rails and not sv.rails:
             continue
         p = project(sv.origin)
         if p is None:
@@ -250,10 +346,26 @@ class GTOOLS_OT_smart_slide(bpy.types.Operator):
     even: bpy.props.BoolProperty(
         name="Even", default=False,
         description="Every vertex moves the same distance (off: each reaches its neighbour at the same time)")
+    push: bpy.props.BoolProperty(
+        name="Push Faces", default=False,
+        description="Push the selected faces along their edges (Face select mode turns this on)")
+    distance: bpy.props.FloatProperty(
+        name="Distance", default=0.0, subtype='DISTANCE',
+        description="Push: how far the faces move along their normal")
     guide: bpy.props.FloatVectorProperty(
         name="Direction", size=2, default=(1.0, 0.0), options={'HIDDEN'})
     ref_object: bpy.props.StringProperty(options={'HIDDEN'})
     ref_index: bpy.props.IntProperty(default=-1, options={'HIDDEN'})
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        if self.push:
+            layout.prop(self, "distance")
+            layout.prop(self, "even", text="Even (same distance along each edge)")
+        else:
+            layout.prop(self, "factor")
+            layout.prop(self, "even")
 
     @classmethod
     def poll(cls, context):
@@ -273,9 +385,12 @@ class GTOOLS_OT_smart_slide(bpy.types.Operator):
         verts, bmeshes = collect(context.objects_in_mode_unique_data)
         if not verts:
             return {'CANCELLED'}
-        guide = Vector(self.guide)
-        guide = guide.normalized() if guide.length > 1e-6 else None
-        apply(verts, project, guide, self.factor, self.even, self._ref(verts))
+        if self.push:
+            apply_push(verts, self.distance, self.even)
+        else:
+            guide = Vector(self.guide)
+            guide = guide.normalized() if guide.length > 1e-6 else None
+            apply(verts, project, guide, self.factor, self.even, self._ref(verts))
         update_meshes(bmeshes)
         return {'FINISHED'}
 
@@ -285,9 +400,16 @@ class GTOOLS_OT_smart_slide(bpy.types.Operator):
         self.project = _projector(context.region, context.region_data)
         self.verts, self.bmeshes = collect(context.objects_in_mode_unique_data)
         mouse = Vector((event.mouse_region_x, event.mouse_region_y))
-        self.ref = nearest(self.verts, self.project, mouse)
+        self.push = tuple(context.tool_settings.mesh_select_mode) == (False, False, True)
+        if self.push:
+            self.ref = nearest([sv for sv in self.verts if sv.normal is not None], self.project, mouse,
+                               need_rails=False)
+            self.distance = 0.0
+        else:
+            self.ref = nearest(self.verts, self.project, mouse)
         if self.ref is None:
-            self.report({'WARNING'}, "Nothing to slide: select vertices or edges with unselected neighbours")
+            self.report({'WARNING'}, "Nothing to push: select faces" if self.push else
+                        "Nothing to slide: select vertices or edges with unselected neighbours")
             return {'CANCELLED'}
         self.ref_object = self.ref.obj.name
         self.ref_index = self.ref.vert.index
@@ -304,14 +426,34 @@ class GTOOLS_OT_smart_slide(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def _refresh_lines(self):
-        self.lines = path_lines(self.verts, self.project, self.current_guide, self.factor, self.even, self.ref)
+        if self.push:
+            self.lines = push_lines(self.verts, self.distance, self.even)
+        else:
+            self.lines = path_lines(self.verts, self.project, self.current_guide, self.factor, self.even, self.ref)
 
     def _header(self, context):
+        if self.push:
+            context.area.header_text_set(
+                f"Smart Push   Distance: {self.distance:.3f}   "
+                f"E: {'Even (same distance along each edge)' if self.even else 'Flat (faces stay parallel)'}   "
+                "Shift: precision   Ctrl: steps of 0.1")
+            return
         context.area.header_text_set(
             f"Smart Slide   Factor: {self.factor:.3f}   "
             f"E: Even ({'on' if self.even else 'off'})   Shift: precision   Ctrl: steps of 0.1")
 
     def _update(self, context, event):
+        if self.push:
+            d = push_from_mouse(self.ref, self.project, self.delta)
+            if event.ctrl:
+                d = round(d * 10.0) / 10.0
+            self.distance = d
+            apply_push(self.verts, d, self.even)
+            update_meshes(self.bmeshes)
+            self._refresh_lines()
+            self._header(context)
+            context.area.tag_redraw()
+            return
         f, guide = factor_from_mouse(self.ref, self.project, self.delta)
         if event.ctrl:
             f = round(f * 10.0) / 10.0
