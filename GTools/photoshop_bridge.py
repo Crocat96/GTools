@@ -6,9 +6,9 @@ Passes (PNG, 8 or 16 bit, transparent background), all from ONE render:
   Clown Object    flat random colour per object    } from the Cryptomatte passes, so
   Clown Material  flat random colour per material  } alpha cut-outs and transparency
                   match the beauty (alpha = beauty alpha); hard edges by default
-  Depth           Z, near = white; range automatic (visible objects), manual
-                  (near / far) or the camera clipping, plus a gamma
-  Alpha           alpha of the beauty render (white = object)
+  Mist            Blender's Mist pass (near = black, far = white), shaped by the World's
+                  mist settings (Start, Depth, Falloff), editable in the panel
+  Alpha          alpha of the beauty render (white = object)
 
 The render is written as a multilayer EXR (Blender 5: every pass is its own part)
 read with OpenImageIO, bundled with Blender, and the beauty is saved again as PNG
@@ -30,7 +30,6 @@ import time
 import bpy
 import numpy as np
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, PointerProperty, StringProperty
-from mathutils import Vector
 
 ADDON_ID = __package__
 
@@ -55,7 +54,8 @@ class GTOOLS_BridgeSettings(bpy.types.PropertyGroup):
         name="Clown Object", description="Flat random colour per object, for selections", default=True)
     use_clown_material: BoolProperty(
         name="Clown Material", description="Flat random colour per material, for selections", default=False)
-    use_depth: BoolProperty(name="Depth", description="Distance to the camera, near = white", default=True)
+    use_mist: BoolProperty(
+        name="Mist", description="Mist pass: near = black, far = white (World mist settings)", default=True)
     use_alpha: BoolProperty(name="Alpha", description="Object mask, white = object", default=True)
     clown_aa: BoolProperty(
         name="Clown Anti-Aliasing",
@@ -63,28 +63,6 @@ class GTOOLS_BridgeSettings(bpy.types.PropertyGroup):
                     "Magic Wand picks clean selections (the alpha always follows the beauty)",
         default=False,
     )
-    depth_range: EnumProperty(
-        name="Depth Range",
-        items=(
-            ('AUTO', "Auto", "From the nearest to the farthest visible point"),
-            ('MANUAL', "Manual", "Between the Near and Far distances"),
-            ('CAMERA', "Camera Clip", "Between the camera's Clip Start and Clip End"),
-        ),
-        default='AUTO',
-    )
-    depth_near: FloatProperty(
-        name="Near", description="Distance from the camera that is white (Auto fills it after each render)",
-        default=0.1, min=0.0, soft_max=1000.0, subtype='DISTANCE', unit='LENGTH',
-    )
-    depth_far: FloatProperty(
-        name="Far", description="Distance from the camera that is black (Auto fills it after each render)",
-        default=100.0, min=0.0, soft_max=1000.0, subtype='DISTANCE', unit='LENGTH',
-    )
-    depth_gamma: FloatProperty(
-        name="Gamma", description="Above 1 keeps more contrast close to the camera, below 1 farther away",
-        default=1.0, min=0.05, max=20.0, soft_min=0.2, soft_max=5.0,
-    )
-    depth_invert: BoolProperty(name="Invert Depth", description="Near = black, far = white", default=False)
     open_photoshop: BoolProperty(
         name="Open in Photoshop",
         description="Stack the passes as layers in Photoshop and save a PSD next to the PNGs",
@@ -122,7 +100,7 @@ def _render_state(scene, view_layer):
     # media_type / file_format first: changing them resets the depth and mode
     snap += _snapshot(r.image_settings, ("media_type", "file_format", "color_mode", "color_depth", "exr_codec",
                                          "compression"))
-    snap += _snapshot(view_layer, ("use_pass_z", "use_pass_combined", "use_pass_cryptomatte_object",
+    snap += _snapshot(view_layer, ("use_pass_mist", "use_pass_combined", "use_pass_cryptomatte_object",
                                    "use_pass_cryptomatte_material", "pass_cryptomatte_depth"))
     return snap
 
@@ -199,83 +177,6 @@ def _write_png(path, values, depth):
 
 
 # ---------------------------------------------------------------------------
-# Depth
-
-def _fill_holes(z, valid, holes, iterations=12):
-    """Give `holes` pixels the mean depth of their valid neighbours, growing inwards.
-    EEVEE's dithered transparency leaves background depth in pixels that have alpha."""
-    z = np.where(valid, z, 0.0)
-    valid = valid.copy()
-    for _ in range(iterations):
-        todo = holes & ~valid
-        if not todo.any():
-            break
-        acc = np.zeros_like(z)
-        cnt = np.zeros_like(z)
-        zv = np.where(valid, z, 0.0)
-        vv = valid.astype(z.dtype)
-        p = np.pad(zv, 1)
-        c = np.pad(vv, 1)
-        h, w = z.shape
-        for dy in (0, 1, 2):
-            for dx in (0, 1, 2):
-                acc += p[dy:dy + h, dx:dx + w]
-                cnt += c[dy:dy + h, dx:dx + w]
-        grow = todo & (cnt > 0)
-        z[grow] = acc[grow] / cnt[grow]
-        valid |= grow
-    return z, valid
-
-
-def depth_values(z, alpha, mode, near, far, gamma=1.0, invert=False, mixed=None):
-    """Depth image 0..1 (near = white) and the (near, far) actually used.
-    `mixed`: pixels shared by several surfaces (from Cryptomatte coverage); without it,
-    semi-transparent alpha is used."""
-    covered = alpha > 1e-4
-    valid = covered & np.isfinite(z) & (z < 1e9)
-    z, valid = _fill_holes(z, valid, covered)
-    # Dithered transparency also mixes front faces, back faces and what is behind from
-    # pixel to pixel: semi-transparent pixels take the nearest surface around them.
-    partial = valid & ((alpha < 0.99) if mixed is None else (mixed | (alpha < 0.99)))
-    if partial.any():
-        near_z = np.where(valid, z, np.inf)
-        h, w = z.shape
-        for _ in range(2):                  # 2 x 3x3 = 5x5 neighbourhood
-            p = np.pad(near_z, 1, constant_values=np.inf)
-            near_z = np.minimum.reduce([p[dy:dy + h, dx:dx + w] for dy in (0, 1, 2) for dx in (0, 1, 2)])
-        z = np.where(partial & np.isfinite(near_z), near_z, z)
-    mask = valid
-    if mode == 'AUTO':
-        if not mask.any():
-            return np.zeros_like(z), (near, far)
-        near, far = float(z[mask].min()), float(z[mask].max())
-    t = np.clip((z - near) / max(far - near, 1e-8), 0.0, 1.0)
-    out = 1.0 - t
-    if abs(gamma - 1.0) > 1e-6:
-        out = out ** gamma
-    if invert:
-        out = 1.0 - out
-    out[~mask] = 0.0
-    return out, (near, far)
-
-
-def selection_depth_range(scene, objects):
-    """(near, far) of the objects' bounding boxes along the camera's view axis."""
-    cam = scene.camera
-    m = cam.matrix_world
-    origin = m.translation
-    forward = (m.to_3x3() @ Vector((0.0, 0.0, -1.0))).normalized()
-    dists = []
-    for ob in objects:
-        corners = ob.bound_box if ob.type not in {'EMPTY', 'LIGHT', 'CAMERA'} else [(0.0, 0.0, 0.0)]
-        for c in corners:
-            dists.append((ob.matrix_world @ Vector(c) - origin).dot(forward))
-    if not dists:
-        return None
-    return max(min(dists), 0.0), max(dists)
-
-
-# ---------------------------------------------------------------------------
 # Clown passes from Cryptomatte
 
 def _id_colors(ids):
@@ -314,14 +215,6 @@ def _crypto_ranks(channels, view_layer, kind):
     cov = np.stack([c for _, c in ranks], axis=2)
     cov = np.where(ids == 0.0, 0.0, np.maximum(cov, 0.0))     # ID 0 = nothing / background
     return ids, cov
-
-
-def mixed_pixels(channels, view_layer):
-    """Pixels no single object covers fully (edges, transparency), or None."""
-    ids, cov = _crypto_ranks(channels, view_layer, "Object")
-    if ids is None:
-        return None
-    return (cov.sum(axis=2) > 0.0) & (cov.max(axis=2) < 0.99)
 
 
 def clown_image(channels, view_layer, kind, alpha, antialias):
@@ -463,7 +356,7 @@ def _export_folder(context, settings):
 
 
 class GTOOLS_OT_photoshop_bridge(bpy.types.Operator):
-    """Render the active camera with Beauty, Clown, Depth and Alpha passes (PNG) and stack
+    """Render the active camera with Beauty, Clown, Mist and Alpha passes (PNG) and stack
     them as layers in Photoshop"""
     bl_idname = "render.gtools_photoshop_bridge"
     bl_label = "Render to Photoshop"
@@ -478,11 +371,11 @@ class GTOOLS_OT_photoshop_bridge(bpy.types.Operator):
 
     def execute(self, context):
         s = _settings(context)
-        if not (s.use_beauty or s.use_clown or s.use_depth or s.use_alpha):
+        if not (s.use_beauty or s.use_clown or s.use_mist or s.use_alpha):
             self.report({'WARNING'}, "No pass selected")
             return {'CANCELLED'}
-        if s.use_clown and context.scene.render.engine == 'BLENDER_WORKBENCH':
-            self.report({'ERROR'}, "Clown passes need EEVEE or Cycles (they use Cryptomatte)")
+        if (s.use_clown or s.use_mist) and context.scene.render.engine == 'BLENDER_WORKBENCH':
+            self.report({'ERROR'}, "Clown and Mist passes need EEVEE or Cycles")
             return {'CANCELLED'}
         if context.window:
             context.window.cursor_set('WAIT')
@@ -540,13 +433,13 @@ class GTOOLS_OT_photoshop_bridge(bpy.types.Operator):
             r.use_single_layer = True       # only the active view layer
             r.film_transparent = True
             view_layer.use_pass_combined = True
-            if s.use_depth:
-                view_layer.use_pass_z = True
-            if s.use_clown_object or s.use_depth:   # depth uses it to find mixed pixels
+            if s.use_mist:
+                view_layer.use_pass_mist = True
+            if s.use_clown_object:
                 view_layer.use_pass_cryptomatte_object = True
             if s.use_clown_material:
                 view_layer.use_pass_cryptomatte_material = True
-            need_exr = s.use_depth or s.use_alpha or s.use_clown
+            need_exr = s.use_mist or s.use_alpha or s.use_clown
             if need_exr:
                 im = r.image_settings
                 if hasattr(im, "media_type"):           # 5.x: multilayer is a media type
@@ -592,22 +485,13 @@ class GTOOLS_OT_photoshop_bridge(bpy.types.Operator):
                     _write_png(path, img, depth)
                     layers.append((path, "Clown " + kind, False))
 
-                if s.use_depth:
-                    z = _find(channels, vl, "Depth.Z")
-                    if z is None:
-                        raise RuntimeError("No depth (Z) pass in the render result (%s)" % ", ".join(channels))
-                    if s.depth_range == 'CAMERA':
-                        cam = scene.camera.data
-                        near, far = cam.clip_start, cam.clip_end
-                    else:
-                        near, far = s.depth_near, s.depth_far
-                    values, used = depth_values(z, alpha, s.depth_range, near, far, s.depth_gamma, s.depth_invert,
-                                                mixed=mixed_pixels(channels, vl))
-                    if s.depth_range == 'AUTO':     # start Manual from what Auto found
-                        s.depth_near, s.depth_far = used
-                    path = os.path.join(folder, stem + "_depth.png")
-                    _write_png(path, values, depth)
-                    layers.append((path, "Depth", False))
+                if s.use_mist:
+                    mist = _find(channels, vl, "Mist.Z")
+                    if mist is None:
+                        raise RuntimeError("No Mist pass in the render result (%s)" % ", ".join(channels))
+                    path = os.path.join(folder, stem + "_mist.png")
+                    _write_png(path, mist, depth)
+                    layers.append((path, "Mist", False))
 
                 if s.use_alpha:
                     path = os.path.join(folder, stem + "_alpha.png")
@@ -616,27 +500,6 @@ class GTOOLS_OT_photoshop_bridge(bpy.types.Operator):
         finally:
             _restore(snap)
         return folder, layers
-
-
-class GTOOLS_OT_bridge_depth_from_selection(bpy.types.Operator):
-    """Set the depth Near / Far to the selected objects (distance along the camera's view)"""
-    bl_idname = "render.gtools_bridge_depth_from_selection"
-    bl_label = "Depth Range from Selection"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return context.scene.camera is not None and bool(context.selected_objects)
-
-    def execute(self, context):
-        rng = selection_depth_range(context.scene, context.selected_objects)
-        if rng is None or rng[1] <= 0.0:
-            self.report({'WARNING'}, "The selection is behind the camera")
-            return {'CANCELLED'}
-        s = _settings(context)
-        s.depth_range = 'MANUAL'
-        s.depth_near, s.depth_far = rng
-        return {'FINISHED'}
 
 
 class GTOOLS_OT_bridge_scale_resolution(bpy.types.Operator):
@@ -682,7 +545,7 @@ class VIEW3D_PT_gtools_bridge(bpy.types.Panel):
         row = col.row(align=True)
         row.prop(s, "use_beauty", toggle=True)
         row.prop(s, "use_alpha", toggle=True)
-        row.prop(s, "use_depth", toggle=True)
+        row.prop(s, "use_mist", toggle=True)
         row = col.row(align=True)
         row.prop(s, "use_clown_object", text="Clown Object", toggle=True)
         row.prop(s, "use_clown_material", text="Clown Material", toggle=True)
@@ -693,32 +556,26 @@ class VIEW3D_PT_gtools_bridge(bpy.types.Panel):
         col.prop(s, "color_depth", expand=True)
         if s.use_clown:
             col.prop(s, "clown_aa")
-            if context.scene.render.engine == 'BLENDER_WORKBENCH':
-                col.label(text="Clown needs EEVEE or Cycles", icon='ERROR')
+        if (s.use_clown or s.use_mist) and context.scene.render.engine == 'BLENDER_WORKBENCH':
+            col.label(text="Clown and Mist need EEVEE or Cycles", icon='ERROR')
         col.prop(s, "output_dir")
         col.prop(s, "open_photoshop")
 
-        if s.use_depth:
+        if s.use_mist:
             box = layout.box()
-            box.label(text="Depth", icon='MOD_THICKNESS')
-            bcol = box.column()
-            bcol.use_property_split = True
-            bcol.use_property_decorate = False
-            bcol.prop(s, "depth_range")
-            if s.depth_range == 'CAMERA' and context.scene.camera:
-                cam = context.scene.camera.data
-                sub = bcol.column(align=True)
-                sub.prop(cam, "clip_start", text="Near")
-                sub.prop(cam, "clip_end", text="Far")
+            box.label(text="Mist Pass", icon='WORLD')
+            world = context.scene.world
+            if world is None:
+                box.label(text="The scene has no World", icon='ERROR')
             else:
+                bcol = box.column()
+                bcol.use_property_split = True
+                bcol.use_property_decorate = False
+                mist = world.mist_settings
                 sub = bcol.column(align=True)
-                sub.active = s.depth_range == 'MANUAL'
-                sub.prop(s, "depth_near")
-                sub.prop(s, "depth_far")
-            bcol.prop(s, "depth_gamma")
-            bcol.prop(s, "depth_invert")
-            box.operator(GTOOLS_OT_bridge_depth_from_selection.bl_idname, text="Range from Selection",
-                         icon='RESTRICT_SELECT_OFF')
+                sub.prop(mist, "start")
+                sub.prop(mist, "depth")
+                bcol.prop(mist, "falloff")
 
         r = context.scene.render
         box = layout.box()
@@ -743,8 +600,8 @@ class VIEW3D_PT_gtools_bridge(bpy.types.Panel):
                          icon='CAMERA_DATA')
 
 
-classes = (GTOOLS_BridgeSettings, GTOOLS_OT_photoshop_bridge, GTOOLS_OT_bridge_depth_from_selection,
-           GTOOLS_OT_bridge_scale_resolution, VIEW3D_PT_gtools_bridge)
+classes = (GTOOLS_BridgeSettings, GTOOLS_OT_photoshop_bridge, GTOOLS_OT_bridge_scale_resolution,
+           VIEW3D_PT_gtools_bridge)
 
 
 def register():
