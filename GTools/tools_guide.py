@@ -117,7 +117,8 @@ GUIDE = (
          "point, and it fills Near / Far for you), Manual (Near / Far, or Range from Selection), or the "
          "camera's clipping; Gamma shifts the contrast towards near or far, Invert swaps black and white. "
          "Then Photoshop opens them as layers of one document (Beauty on top, the others hidden) and saves "
-         "a PSD next to the PNGs. Needs EEVEE or Cycles for the clown passes. Blender waits while it "
+         "a PSD next to the PNGs. The panel also sets the render resolution (X / Y, %, and / 2 or x 2 "
+         "buttons). Needs EEVEE or Cycles for the clown passes. Blender waits while it "
          "renders. Photoshop is found automatically; another path can be set in the preferences."),
         ("G TOOLS RENDER panel", "Properties > Render",
          "A panel with quick access to common render settings."),

@@ -639,6 +639,31 @@ class GTOOLS_OT_bridge_depth_from_selection(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class GTOOLS_OT_bridge_scale_resolution(bpy.types.Operator):
+    """Multiply the render resolution (X and Y), keeping the aspect ratio"""
+    bl_idname = "render.gtools_bridge_scale_resolution"
+    bl_label = "Scale Resolution"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    factor: FloatProperty(name="Factor", default=2.0, min=0.01, max=100.0)
+
+    @classmethod
+    def description(cls, context, props):
+        if props.factor < 1.0:
+            return "Halve the render resolution (X and Y)"
+        return "Double the render resolution (X and Y)"
+
+    def execute(self, context):
+        r = context.scene.render
+        x = round(r.resolution_x * self.factor)
+        y = round(r.resolution_y * self.factor)
+        if min(x, y) < 4 or max(x, y) > 65536:
+            self.report({'WARNING'}, "Resolution out of range (4 - 65536)")
+            return {'CANCELLED'}
+        r.resolution_x, r.resolution_y = x, y
+        return {'FINISHED'}
+
+
 # ---------------------------------------------------------------------------
 # Panel
 
@@ -695,6 +720,17 @@ class VIEW3D_PT_gtools_bridge(bpy.types.Panel):
             box.operator(GTOOLS_OT_bridge_depth_from_selection.bl_idname, text="Range from Selection",
                          icon='RESTRICT_SELECT_OFF')
 
+        r = context.scene.render
+        box = layout.box()
+        box.label(text="Resolution", icon='FULLSCREEN_ENTER')
+        col = box.column(align=True)
+        col.prop(r, "resolution_x", text="X")
+        col.prop(r, "resolution_y", text="Y")
+        row = box.row(align=True)
+        row.operator(GTOOLS_OT_bridge_scale_resolution.bl_idname, text="/ 2").factor = 0.5
+        row.operator(GTOOLS_OT_bridge_scale_resolution.bl_idname, text="x 2").factor = 2.0
+        row.prop(r, "resolution_percentage", text="")
+
         cam = context.scene.camera
         row = layout.row()
         row.scale_y = 1.5
@@ -702,14 +738,13 @@ class VIEW3D_PT_gtools_bridge(bpy.types.Panel):
         if cam is None:
             layout.label(text="No active camera", icon='ERROR')
         else:
-            r = context.scene.render
             pct = r.resolution_percentage / 100.0
             layout.label(text="%s  ·  %d × %d" % (cam.name, int(r.resolution_x * pct), int(r.resolution_y * pct)),
                          icon='CAMERA_DATA')
 
 
 classes = (GTOOLS_BridgeSettings, GTOOLS_OT_photoshop_bridge, GTOOLS_OT_bridge_depth_from_selection,
-           VIEW3D_PT_gtools_bridge)
+           GTOOLS_OT_bridge_scale_resolution, VIEW3D_PT_gtools_bridge)
 
 
 def register():
