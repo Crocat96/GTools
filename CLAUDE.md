@@ -20,11 +20,18 @@ Deriva de HEAVYPOLY (archivos `HEAVYPOLY_*`) con herramientas propias nuevas (ar
   para Linux, `extension validate` + `build` + `server-generate --html`, y publica en GitHub Pages.
 - URL del repositorio en Blender: `https://crocat96.github.io/GTools/index.json` (Pages con fuente "GitHub Actions").
 - **Para que Blender ofrezca la actualización hay que subir `version` en el manifest** (y por coherencia en `bl_info`).
-- Probar el build local: `"C:\Program Files\Blender Foundation\Blender 5.0\blender.exe" --command extension build --source-dir GTools --output-dir <dir>`.
-- Ejecutables en este PC: 5.0.1 en `C:\Program Files\Blender Foundation\Blender 5.0\`; portables (3.6, 4.3, 5.0, 5.1,
-  **5.3 RC**) en `C:\Users\Hp\Documents\Blender\`. La extensión está instalada en el 5.3.
-  En `%APPDATA%\Blender Foundation\Blender\5.0\scripts\addons\GTools` sigue la versión antigua como add-on clásico:
-  al probar con `--python`, importar una copia renombrada para no cargar esa por error.
+- Probar el build local: `"<blender.exe>" --command extension build --source-dir GTools --output-dir <dir>`.
+- Se trabaja en **dos PCs**; mirar cuál es por la ruta del repo o el usuario de Windows.
+  - **PC de casa** (usuario `Hp`): 5.0.1 en `C:\Program Files\Blender Foundation\Blender 5.0\`; portables (3.6, 4.3,
+    5.0, 5.1, **5.3 RC**) en `C:\Users\Hp\Documents\Blender\`. La extensión está instalada en el 5.3.
+    En `%APPDATA%\Blender Foundation\Blender\5.0\scripts\addons\GTools` sigue la versión antigua como add-on clásico.
+  - **PC del trabajo** (usuario `gjimenez`, repo en `D:\Blender\Extensions\GTools`): solo portables, sin 5.0 instalado:
+    `D:\Blender\blender-5.1.0-windows-x64\blender-5.1.0-windows-x64\blender.exe` y
+    `D:\Blender\blender-5.3.0-beta+v53.873fa9640966-windows.amd64-release\blender-5.3.0-beta+v53.873fa9640966-windows.amd64-release\blender.exe`
+    (**5.3 beta**). La extensión aún no está instalada; en `%APPDATA%\Blender Foundation\Blender\5.1\scripts\addons\GTools`
+    hay una versión antigua como add-on clásico. Git en `C:\Program Files\Git\cmd\git.exe` (puede no estar en el PATH);
+    el `.gitconfig` global (H:) no es escribible, la identidad está en el config local del repo.
+  - En ambos: al probar con `--python`, importar una copia renombrada para no cargar el add-on antiguo por error.
 
 ## Módulos
 
@@ -44,6 +51,7 @@ Herramientas propias (prefijo de clases `GTOOLS_`, operadores `*.gtools_*`):
 | `curve_patch` | Pie Select (Object Mode, solo con 2–4 curvas seleccionadas) → objeto "Patch" con parche de Coons vivo (grupo `GT_CurvePatch`): 4 curvas = parche, 3 = triangular (lado Top colapsado), 2 = loft reglado. Orientación (Bottom/Top/Left/Right + Reverse) calculada al crear desde los extremos; editable en el modificador. Solo usa el primer spline. |
 | `smart_slide` | En modo cara = **push**: cada vértice sigue su arista más alineada con la normal de las caras (línea infinita); por defecto la cara queda plana y paralela (avance = distancia / cos), E = misma distancia por arista; sin arista guía (cos < 0.25) va por la normal. Preview en POST_VIEW: antes de mover, todas las aristas posibles; deslizando, la arista seguida + su línea prolongada + origen. Shift G en Edit Mode (vía `mesh.push_and_slide`, que en modo cara sigue haciendo shrink/fatten). Vertex + edge slide en uno: cada vértice sigue una arista hacia un vecino no seleccionado tratada como línea infinita (pasa del vecino y, si no hay arista hacia el ratón, sigue la opuesta prolongada: sale por los bordes). E = Even, Shift = precisión, Ctrl = pasos de 0.1. **L = Lock axis** (congela el `guide`; factor con signo vía `factor_locked`, así al volver atrás sigue por las mismas aristas prolongadas; preview naranja). **Rueda / Tab / Shift Tab** = siguiente eje del vértice de referencia (`axes`, ordenados por ángulo) y lo bloquea, conservando la distancia en unidades de mundo. Lógica separada de la proyección (`project` inyectable) para poder testearla. |
 | `xray_select` | Box/lasso/circle con X-ray temporal. |
+| `photoshop_bridge` | Panel "Photoshop Bridge" (N > G-Tools, ajustes en `scene.gtools_bridge`): render de la cámara activa → PNG 8/16 bit transparentes (Beauty, Clown, Depth, Alpha) en una subcarpeta por export → `.jsx` generado que se pasa a `Photoshop.exe` y apila los PNG como capas (Beauty arriba, resto ocultas) + guarda PSD. Beauty = motor de la escena con `write_still` a EXR multicapa + `save_render` a PNG (respeta la gestión de color). **En Blender 5.x el EXR multicapa va por `image_settings.media_type = 'MULTI_LAYER_IMAGE'`** y cada pase es una *parte* (subimage) distinta: leer con OpenImageIO recorriendo `seek_subimage`. Clown = Workbench FLAT, `RANDOM` o `MATERIAL` con `diffuse_color` temporal, AA off, `dither_intensity = 0`, view transform Standard. Todo ajuste tocado se guarda y restaura (`_render_state`). Photoshop se busca en el registro (`HKLM\SOFTWARE\Adobe\Photoshop\<ver>\ApplicationPath`) o en `photoshop_path` de las preferencias. Render bloqueante. |
 | `keymaps` + `keymap_data` | Atajos configurables en las preferencias del add-on (ver abajo). |
 | `cheatsheet` | Panel "G-Tools" en la barra lateral (N) con los atajos activos. |
 | `tools_guide` | Pestaña "Tools Guide" de las preferencias: `GUIDE` = texto de cada herramienta (cómo se usa / qué hace), con buscador. **Al añadir o cambiar una herramienta, actualizar aquí su entrada.** |

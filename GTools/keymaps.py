@@ -552,6 +552,11 @@ class GTOOLS_AddonPreferences(bpy.types.AddonPreferences):
         description="'G-Tools' panel in the sidebar (N) with the main hotkeys",
         default=True,
     )
+    photoshop_path: StringProperty(
+        name="Photoshop",
+        description="Photoshop.exe used by the Photoshop Bridge. Empty = find the newest installed version",
+        default="", subtype='FILE_PATH',
+    )
 
     tab: EnumProperty(
         items=(
@@ -581,6 +586,7 @@ class GTOOLS_AddonPreferences(bpy.types.AddonPreferences):
         col.prop(self, "use_pies")
         col.prop(self, "use_xray_select")
         col.prop(self, "show_cheatsheet")
+        col.prop(self, "photoshop_path")
 
         layout.separator()
         row = layout.row()

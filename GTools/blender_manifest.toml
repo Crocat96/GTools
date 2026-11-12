@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "gtools"
-version = "0.7.1"
+version = "0.8.0"
 name = "G-Tools"
 tagline = "Faster, smarter hard-surface modeling tools and pies"
 maintainer = "Gabriel Jimenez"
@@ -14,6 +14,9 @@ blender_version_min = "5.0.0"
 
 license = ["SPDX:GPL-3.0-or-later"]
 copyright = ["2026 Gabriel Jimenez"]
+
+[permissions]
+files = "Photoshop Bridge saves render passes and a PSD to disk"
 
 [build]
 paths_exclude_pattern = [

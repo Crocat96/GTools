@@ -1,7 +1,7 @@
 bl_info = {
     "name": "G TOOLS",
     "author": "Gabriel Jimenez",
-    "version": (0, 7, 1),
+    "version": (0, 8, 0),
     "blender": (5, 0, 0),
     "location": "Edit > Preferences > Add-ons > G Tools (hotkeys) | View3D > Sidebar > G-Tools",
     "description": "Quicker and smarter Blender tools",
@@ -19,7 +19,7 @@ modules_names = [
     'HEAVYPOLY_draw_primitives', 'HEAVYPOLY_OPERATORS',
     'HEAVYPOLY_panel_render', 'HEAVYPOLY_pie_add', 'HEAVYPOLY_pie_boolean',
     'HEAVYPOLY_pie_save', 'HEAVYPOLY_pie_selection', 'HEAVYPOLY_pie_shading',
-    'HEAVYPOLY_pie_view', 'sharp_subtract', 'smart_cut', 'curve_align', 'loop_resample', 'modifier_scroll', 'quick_decal', 'panel_line', 'ornament', 'edge_bevel', 'xray_select', 'curve_patch', 'smart_slide', 'keymaps', 'cheatsheet'
+    'HEAVYPOLY_pie_view', 'sharp_subtract', 'smart_cut', 'curve_align', 'loop_resample', 'modifier_scroll', 'quick_decal', 'panel_line', 'ornament', 'edge_bevel', 'xray_select', 'curve_patch', 'smart_slide', 'photoshop_bridge', 'keymaps', 'cheatsheet'
 ]  # A list of imported module names #'HEAVYPOLY_select_through_border' 'HEAVYPOLY_menu_master',
 
 
