@@ -1,25 +1,26 @@
 """Photoshop Bridge: render the active camera with compositing passes and open them
 in Photoshop as layers of one document.
 
-Passes (PNG, 8 or 16 bit, transparent background):
-  Beauty  the scene's own engine and color management, film transparent
-  Clown   Workbench, flat random colour per object (or per material), no AA by default
-  Depth   Z of the beauty render, normalised to the visible objects (near = white)
-  Alpha   alpha of the beauty render (white = object)
+Passes (PNG, 8 or 16 bit, transparent background), all from ONE render:
+  Beauty          the scene's own engine and color management, film transparent
+  Clown Object    flat random colour per object    } from the Cryptomatte passes, so
+  Clown Material  flat random colour per material  } alpha cut-outs and transparency
+                  match the beauty (alpha = beauty alpha); hard edges by default
+  Depth           Z, near = white; range automatic (visible objects), manual
+                  (near / far) or the camera clipping, plus a gamma
+  Alpha           alpha of the beauty render (white = object)
 
-The beauty render is written once as a multilayer EXR (Z + alpha are read from it
-with OpenImageIO, bundled with Blender) and once as PNG through `save_render`, so
-the PNG keeps the scene's view transform. The clown pass is a second, fast
-Workbench render. Every render setting touched is restored afterwards.
+The render is written as a multilayer EXR (Blender 5: every pass is its own part)
+read with OpenImageIO, bundled with Blender, and the beauty is saved again as PNG
+through `save_render`, so it keeps the scene's view transform. Every render setting
+touched is restored afterwards.
 
 Photoshop is driven with a generated ExtendScript (.jsx) passed to Photoshop.exe:
 it opens the PNGs, stacks them as layers (Beauty on top, the rest hidden) and saves
 a PSD next to them.
 """
 
-import colorsys
 import glob
-import hashlib
 import os
 import subprocess
 import sys
@@ -28,7 +29,8 @@ import time
 
 import bpy
 import numpy as np
-from bpy.props import BoolProperty, EnumProperty, PointerProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, PointerProperty, StringProperty
+from mathutils import Vector
 
 ADDON_ID = __package__
 
@@ -49,21 +51,38 @@ class GTOOLS_BridgeSettings(bpy.types.PropertyGroup):
         default='16',
     )
     use_beauty: BoolProperty(name="Beauty", description="Final render with transparent background", default=True)
-    use_clown: BoolProperty(name="Clown", description="Flat random colour per object or material, for selections", default=True)
+    use_clown_object: BoolProperty(
+        name="Clown Object", description="Flat random colour per object, for selections", default=True)
+    use_clown_material: BoolProperty(
+        name="Clown Material", description="Flat random colour per material, for selections", default=False)
     use_depth: BoolProperty(name="Depth", description="Distance to the camera, near = white", default=True)
     use_alpha: BoolProperty(name="Alpha", description="Object mask, white = object", default=True)
-    clown_mode: EnumProperty(
-        name="Clown Colors",
-        items=(
-            ('OBJECT', "Per Object", "A random colour for every object"),
-            ('MATERIAL', "Per Material", "A random colour for every material"),
-        ),
-        default='OBJECT',
-    )
     clown_aa: BoolProperty(
         name="Clown Anti-Aliasing",
-        description="Smooth clown edges. Off gives hard edges, so the Magic Wand picks exact colours",
+        description="Blend the colours where objects meet. Off gives one exact colour per pixel, so the "
+                    "Magic Wand picks clean selections (the alpha always follows the beauty)",
         default=False,
+    )
+    depth_range: EnumProperty(
+        name="Depth Range",
+        items=(
+            ('AUTO', "Auto", "From the nearest to the farthest visible point"),
+            ('MANUAL', "Manual", "Between the Near and Far distances"),
+            ('CAMERA', "Camera Clip", "Between the camera's Clip Start and Clip End"),
+        ),
+        default='AUTO',
+    )
+    depth_near: FloatProperty(
+        name="Near", description="Distance from the camera that is white (Auto fills it after each render)",
+        default=0.1, min=0.0, soft_max=1000.0, subtype='DISTANCE', unit='LENGTH',
+    )
+    depth_far: FloatProperty(
+        name="Far", description="Distance from the camera that is black (Auto fills it after each render)",
+        default=100.0, min=0.0, soft_max=1000.0, subtype='DISTANCE', unit='LENGTH',
+    )
+    depth_gamma: FloatProperty(
+        name="Gamma", description="Above 1 keeps more contrast close to the camera, below 1 farther away",
+        default=1.0, min=0.05, max=20.0, soft_min=0.2, soft_max=5.0,
     )
     depth_invert: BoolProperty(name="Invert Depth", description="Near = black, far = white", default=False)
     open_photoshop: BoolProperty(
@@ -71,6 +90,10 @@ class GTOOLS_BridgeSettings(bpy.types.PropertyGroup):
         description="Stack the passes as layers in Photoshop and save a PSD next to the PNGs",
         default=True,
     )
+
+    @property
+    def use_clown(self):
+        return self.use_clown_object or self.use_clown_material
 
 
 def _settings(context):
@@ -94,19 +117,13 @@ def _restore(snap):
 
 def _render_state(scene, view_layer):
     r = scene.render
-    shading = scene.display.shading
     snap = []
-    snap += _snapshot(r, ("engine", "film_transparent", "filepath", "use_compositing", "use_sequencer",
-                          "use_single_layer", "use_file_extension", "dither_intensity"))
+    snap += _snapshot(r, ("film_transparent", "filepath", "use_single_layer", "use_file_extension"))
     # media_type / file_format first: changing them resets the depth and mode
     snap += _snapshot(r.image_settings, ("media_type", "file_format", "color_mode", "color_depth", "exr_codec",
                                          "compression"))
-    snap += _snapshot(view_layer, ("use_pass_z", "use_pass_combined"))
-    snap += _snapshot(scene.display, ("render_aa",))
-    snap += _snapshot(shading, ("light", "color_type", "show_shadows", "show_cavity", "show_object_outline",
-                                "show_specular_highlight", "use_dof", "show_xray", "show_backface_culling",
-                                "use_world_space_lighting"))
-    snap += _snapshot(scene.view_settings, ("view_transform", "look", "exposure", "gamma", "use_curve_mapping"))
+    snap += _snapshot(view_layer, ("use_pass_z", "use_pass_combined", "use_pass_cryptomatte_object",
+                                   "use_pass_cryptomatte_material", "pass_cryptomatte_depth"))
     return snap
 
 
@@ -124,12 +141,13 @@ def _set_png(scene, depth, rgba=True):
 # Image helpers (OpenImageIO)
 
 def _read_exr(path):
+    """{channel name: 2D float array, top row first}."""
     import OpenImageIO as oiio
     inp = oiio.ImageInput.open(path)
     if inp is None:
         raise RuntimeError("Could not read the render passes: " + oiio.geterror())
     # Blender 5 writes every pass as its own part (subimage) of the EXR
-    names, planes = [], []
+    channels = {}
     sub = 0
     while inp.seek_subimage(sub, 0):
         spec = inp.spec()
@@ -137,69 +155,193 @@ def _read_exr(path):
         if data is not None:
             data = np.asarray(data, dtype=np.float32).reshape(spec.height, spec.width, spec.nchannels)
             for c, n in enumerate(spec.channelnames):
-                names.append(n)
-                planes.append(data[:, :, c])
+                channels[n] = data[:, :, c]
         sub += 1
     inp.close()
-    if not planes:
+    if not channels:
         raise RuntimeError("The render passes are empty")
-    return names, np.stack(planes, axis=2)
+    return channels
 
 
-def _channel(names, data, view_layer, want):
-    """`want` = 'A' (combined alpha) or 'Z' (depth)."""
+def _find(channels, view_layer, suffix):
+    """Channel of the active view layer ending in `suffix` (case-insensitive)."""
+    suffix = suffix.lower()
     prefix = view_layer + "."
     for strict in (True, False):
-        for i, n in enumerate(names):
-            if strict and not n.startswith(prefix):
+        for name, data in channels.items():
+            if strict and not name.startswith(prefix):
                 continue
-            if want == 'A' and n.endswith("Combined.A"):
-                return data[:, :, i]
-            if want == 'Z' and (n.endswith("Depth.Z") or n.endswith(".Z")):
-                return data[:, :, i]
+            if name.lower().endswith(suffix):
+                return data
     return None
 
 
-def _write_gray(path, values, depth):
-    """values: float array 0..1, top row first."""
+def _write_png(path, values, depth):
+    """values: float array 0..1, (h, w) or (h, w, channels), top row first."""
     import OpenImageIO as oiio
     values = np.clip(np.nan_to_num(values), 0.0, 1.0)
+    if values.ndim == 2:
+        values = values[:, :, None]
     if depth == '16':
         arr, fmt = (values * 65535.0 + 0.5).astype(np.uint16), oiio.UINT16
     else:
         arr, fmt = (values * 255.0 + 0.5).astype(np.uint8), oiio.UINT8
-    h, w = arr.shape
-    spec = oiio.ImageSpec(w, h, 1, fmt)
+    h, w, n = arr.shape
+    spec = oiio.ImageSpec(w, h, n, fmt)
+    if n == 4:
+        spec.alpha_channel = 3
+        spec.attribute("oiio:UnassociatedAlpha", 1)    # colours are not premultiplied
     out = oiio.ImageOutput.create(path)
     if out is None or not out.open(path, spec):
         raise RuntimeError("Could not write " + path)
-    out.write_image(arr.reshape(h, w, 1))
+    out.write_image(np.ascontiguousarray(arr))
     out.close()
 
 
-def _depth_values(z, alpha, invert):
-    mask = (alpha > 1e-4) & np.isfinite(z) & (z < 1e9)
-    out = np.zeros_like(z)
-    if not mask.any():
-        return out
-    near, far = float(z[mask].min()), float(z[mask].max())
-    span = max(far - near, 1e-8)
-    t = (z - near) / span
-    out = t if invert else 1.0 - t
+# ---------------------------------------------------------------------------
+# Depth
+
+def _fill_holes(z, valid, holes, iterations=12):
+    """Give `holes` pixels the mean depth of their valid neighbours, growing inwards.
+    EEVEE's dithered transparency leaves background depth in pixels that have alpha."""
+    z = np.where(valid, z, 0.0)
+    valid = valid.copy()
+    for _ in range(iterations):
+        todo = holes & ~valid
+        if not todo.any():
+            break
+        acc = np.zeros_like(z)
+        cnt = np.zeros_like(z)
+        zv = np.where(valid, z, 0.0)
+        vv = valid.astype(z.dtype)
+        p = np.pad(zv, 1)
+        c = np.pad(vv, 1)
+        h, w = z.shape
+        for dy in (0, 1, 2):
+            for dx in (0, 1, 2):
+                acc += p[dy:dy + h, dx:dx + w]
+                cnt += c[dy:dy + h, dx:dx + w]
+        grow = todo & (cnt > 0)
+        z[grow] = acc[grow] / cnt[grow]
+        valid |= grow
+    return z, valid
+
+
+def depth_values(z, alpha, mode, near, far, gamma=1.0, invert=False, mixed=None):
+    """Depth image 0..1 (near = white) and the (near, far) actually used.
+    `mixed`: pixels shared by several surfaces (from Cryptomatte coverage); without it,
+    semi-transparent alpha is used."""
+    covered = alpha > 1e-4
+    valid = covered & np.isfinite(z) & (z < 1e9)
+    z, valid = _fill_holes(z, valid, covered)
+    # Dithered transparency also mixes front faces, back faces and what is behind from
+    # pixel to pixel: semi-transparent pixels take the nearest surface around them.
+    partial = valid & ((alpha < 0.99) if mixed is None else (mixed | (alpha < 0.99)))
+    if partial.any():
+        near_z = np.where(valid, z, np.inf)
+        h, w = z.shape
+        for _ in range(2):                  # 2 x 3x3 = 5x5 neighbourhood
+            p = np.pad(near_z, 1, constant_values=np.inf)
+            near_z = np.minimum.reduce([p[dy:dy + h, dx:dx + w] for dy in (0, 1, 2) for dx in (0, 1, 2)])
+        z = np.where(partial & np.isfinite(near_z), near_z, z)
+    mask = valid
+    if mode == 'AUTO':
+        if not mask.any():
+            return np.zeros_like(z), (near, far)
+        near, far = float(z[mask].min()), float(z[mask].max())
+    t = np.clip((z - near) / max(far - near, 1e-8), 0.0, 1.0)
+    out = 1.0 - t
+    if abs(gamma - 1.0) > 1e-6:
+        out = out ** gamma
+    if invert:
+        out = 1.0 - out
     out[~mask] = 0.0
-    return out
+    return out, (near, far)
+
+
+def selection_depth_range(scene, objects):
+    """(near, far) of the objects' bounding boxes along the camera's view axis."""
+    cam = scene.camera
+    m = cam.matrix_world
+    origin = m.translation
+    forward = (m.to_3x3() @ Vector((0.0, 0.0, -1.0))).normalized()
+    dists = []
+    for ob in objects:
+        corners = ob.bound_box if ob.type not in {'EMPTY', 'LIGHT', 'CAMERA'} else [(0.0, 0.0, 0.0)]
+        for c in corners:
+            dists.append((ob.matrix_world @ Vector(c) - origin).dot(forward))
+    if not dists:
+        return None
+    return max(min(dists), 0.0), max(dists)
 
 
 # ---------------------------------------------------------------------------
-# Clown colours per material
+# Clown passes from Cryptomatte
 
-def _material_color(name):
-    h = int(hashlib.md5(name.encode("utf-8")).hexdigest()[:8], 16)
-    hue = (h % 1000) / 1000.0
-    sat = 0.55 + ((h >> 10) % 45) / 100.0
-    val = 0.6 + ((h >> 17) % 40) / 100.0
-    r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
-    return (r, g, b, 1.0)
+def _id_colors(ids):
+    """Bright random colour per Cryptomatte ID (float hash), as (n, 3)."""
+    bits = np.ascontiguousarray(ids, dtype=np.float32).view(np.uint32).astype(np.uint64)
+    h = (bits * np.uint64(2654435761)) & np.uint64(0xFFFFFFFF)
+    h ^= h >> np.uint64(15)
+    h = (h * np.uint64(2246822519)) & np.uint64(0xFFFFFFFF)
+    h ^= h >> np.uint64(13)
+    hue = (h & np.uint64(0xFFFF)).astype(np.float64) / 65536.0
+    sat = 0.55 + ((h >> np.uint64(16)) & np.uint64(0xFF)).astype(np.float64) / 255.0 * 0.45
+    val = 0.65 + ((h >> np.uint64(24)) & np.uint64(0xFF)).astype(np.float64) / 255.0 * 0.35
+    i = np.floor(hue * 6.0).astype(np.int64) % 6
+    f = hue * 6.0 - np.floor(hue * 6.0)
+    p, q, t = val * (1 - sat), val * (1 - f * sat), val * (1 - (1 - f) * sat)
+    r = np.choose(i, [val, q, p, p, t, val])
+    g = np.choose(i, [t, val, val, q, p, p])
+    b = np.choose(i, [p, p, t, val, val, q])
+    return np.stack([r, g, b], axis=1).astype(np.float32)
+
+
+def _crypto_ranks(channels, view_layer, kind):
+    """(ids, coverage) arrays (h, w, ranks); coverage is 0 for ID 0 (nothing)."""
+    ranks = []
+    for level in range(16):
+        r = _find(channels, view_layer, "Crypto%s%02d.r" % (kind, level))
+        if r is None:
+            break
+        ranks.append((r, _find(channels, view_layer, "Crypto%s%02d.g" % (kind, level))))
+        ranks.append((_find(channels, view_layer, "Crypto%s%02d.b" % (kind, level)),
+                      _find(channels, view_layer, "Crypto%s%02d.a" % (kind, level))))
+    ranks = [(i, c) for i, c in ranks if i is not None and c is not None]
+    if not ranks:
+        return None, None
+    ids = np.stack([i for i, _ in ranks], axis=2)
+    cov = np.stack([c for _, c in ranks], axis=2)
+    cov = np.where(ids == 0.0, 0.0, np.maximum(cov, 0.0))     # ID 0 = nothing / background
+    return ids, cov
+
+
+def mixed_pixels(channels, view_layer):
+    """Pixels no single object covers fully (edges, transparency), or None."""
+    ids, cov = _crypto_ranks(channels, view_layer, "Object")
+    if ids is None:
+        return None
+    return (cov.sum(axis=2) > 0.0) & (cov.max(axis=2) < 0.99)
+
+
+def clown_image(channels, view_layer, kind, alpha, antialias):
+    """RGBA clown image from the Crypto<kind>NN layers. kind = 'Object' or 'Material'."""
+    ids, cov = _crypto_ranks(channels, view_layer, kind)
+    if ids is None:
+        return None
+    uniq, inverse = np.unique(ids, return_inverse=True)
+    palette = _id_colors(uniq)
+    colors = palette[inverse.reshape(ids.shape)]                # (h, w, ranks, 3)
+    if antialias:
+        total = cov.sum(axis=2, keepdims=True)
+        rgb = (colors * cov[..., None]).sum(axis=2) / np.maximum(total, 1e-8)
+    else:
+        best = np.argmax(cov, axis=2)                           # strongest ID of the pixel
+        rgb = np.take_along_axis(colors, best[:, :, None, None], axis=2)[:, :, 0, :]
+    covered = cov.sum(axis=2) > 0.0
+    a = np.where(covered, alpha, 0.0)
+    rgb[~covered] = 0.0
+    return np.concatenate([rgb, a[:, :, None]], axis=2)
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +443,7 @@ def write_jsx(path, layers, psd_path):
 
 
 # ---------------------------------------------------------------------------
-# Operator
+# Operators
 
 def _safe(name):
     keep = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
@@ -339,6 +481,9 @@ class GTOOLS_OT_photoshop_bridge(bpy.types.Operator):
         if not (s.use_beauty or s.use_clown or s.use_depth or s.use_alpha):
             self.report({'WARNING'}, "No pass selected")
             return {'CANCELLED'}
+        if s.use_clown and context.scene.render.engine == 'BLENDER_WORKBENCH':
+            self.report({'ERROR'}, "Clown passes need EEVEE or Cycles (they use Cryptomatte)")
+            return {'CANCELLED'}
         if context.window:
             context.window.cursor_set('WAIT')
         try:
@@ -360,7 +505,7 @@ class GTOOLS_OT_photoshop_bridge(bpy.types.Operator):
             self._open_folder(folder)
             return {'FINISHED'}
         base = os.path.basename(os.path.normpath(folder))
-        jsx =os.path.join(folder, base + ".jsx")
+        jsx = os.path.join(folder, base + ".jsx")
         write_jsx(jsx, layers, os.path.join(folder, base + ".psd"))
         try:
             subprocess.Popen([ps, jsx])
@@ -387,102 +532,111 @@ class GTOOLS_OT_photoshop_bridge(bpy.types.Operator):
         view_layer = context.view_layer
         r = scene.render
         folder = _export_folder(context, s)
-        stem = os.path.basename(folder)
+        stem = os.path.basename(os.path.normpath(folder))
         depth = s.color_depth
         layers = []                         # (path, name, visible), top first
         snap = _render_state(scene, view_layer)
-        materials = []
         try:
             r.use_single_layer = True       # only the active view layer
             r.film_transparent = True
-
-            if s.use_beauty or s.use_depth or s.use_alpha:
-                view_layer.use_pass_combined = True
-                if s.use_depth:
-                    view_layer.use_pass_z = True
-                need_exr = s.use_depth or s.use_alpha
-                if need_exr:
-                    im = r.image_settings
-                    if hasattr(im, "media_type"):       # 5.x: multilayer is a media type
-                        im.media_type = 'MULTI_LAYER_IMAGE'
-                    else:
-                        im.file_format = 'OPEN_EXR_MULTILAYER'
-                    im.color_depth = '32'
-                    r.use_file_extension = True
-                    r.filepath = os.path.join(folder, "_passes_")
-                bpy.ops.render.render(write_still=need_exr)
-                result = bpy.data.images.get("Render Result")
-                if result is None:
-                    raise RuntimeError("The render did not finish")
-
-                if s.use_beauty:
-                    _set_png(scene, depth)
-                    path = os.path.join(folder, stem + "_beauty.png")
-                    result.save_render(filepath=path, scene=scene)
-                    layers.append((path, "Beauty", True))
-
-                if need_exr:
-                    exrs = sorted(glob.glob(os.path.join(folder, "_passes_*.exr")))
-                    if not exrs:
-                        raise RuntimeError("The render passes were not written")
-                    names, data = _read_exr(exrs[-1])
-                    for f in exrs:
-                        try:
-                            os.remove(f)
-                        except OSError:
-                            pass
-                    alpha = _channel(names, data, view_layer.name, 'A')
-                    if alpha is None:
-                        raise RuntimeError("No alpha in the render result")
-                    if s.use_depth:
-                        z = _channel(names, data, view_layer.name, 'Z')
-                        if z is None:
-                            raise RuntimeError("No depth (Z) pass in the render result (%s)" % ", ".join(names))
-                        path = os.path.join(folder, stem + "_depth.png")
-                        _write_gray(path, _depth_values(z, alpha, s.depth_invert), depth)
-                        layers.append((path, "Depth", False))
-                    if s.use_alpha:
-                        path = os.path.join(folder, stem + "_alpha.png")
-                        _write_gray(path, alpha, depth)
-                        layers.append((path, "Alpha", False))
-
-            if s.use_clown:
-                r.engine = 'BLENDER_WORKBENCH'
-                r.use_compositing = False
-                r.use_sequencer = False
-                r.dither_intensity = 0.0    # exact flat colours
-                sh = scene.display.shading
-                sh.light = 'FLAT'
-                if s.clown_mode == 'MATERIAL':
-                    sh.color_type = 'MATERIAL'
-                    for mat in bpy.data.materials:
-                        materials.append((mat, tuple(mat.diffuse_color)))
-                        mat.diffuse_color = _material_color(mat.name)
+            view_layer.use_pass_combined = True
+            if s.use_depth:
+                view_layer.use_pass_z = True
+            if s.use_clown_object or s.use_depth:   # depth uses it to find mixed pixels
+                view_layer.use_pass_cryptomatte_object = True
+            if s.use_clown_material:
+                view_layer.use_pass_cryptomatte_material = True
+            need_exr = s.use_depth or s.use_alpha or s.use_clown
+            if need_exr:
+                im = r.image_settings
+                if hasattr(im, "media_type"):           # 5.x: multilayer is a media type
+                    im.media_type = 'MULTI_LAYER_IMAGE'
                 else:
-                    sh.color_type = 'RANDOM'
-                for name in ("show_shadows", "show_cavity", "show_object_outline", "show_specular_highlight",
-                             "use_dof", "show_xray"):
-                    if hasattr(sh, name):
-                        setattr(sh, name, False)
-                scene.display.render_aa = '8' if s.clown_aa else 'OFF'
-                vs = scene.view_settings
-                vs.view_transform = 'Standard'
-                vs.look = 'None'
-                vs.exposure = 0.0
-                vs.gamma = 1.0
-                vs.use_curve_mapping = False
-                bpy.ops.render.render(write_still=False)
-                result = bpy.data.images.get("Render Result")
+                    im.file_format = 'OPEN_EXR_MULTILAYER'
+                im.color_depth = '32'
+                r.use_file_extension = True
+                r.filepath = os.path.join(folder, "_passes_")
+            bpy.ops.render.render(write_still=need_exr)
+            result = bpy.data.images.get("Render Result")
+            if result is None:
+                raise RuntimeError("The render did not finish")
+
+            if s.use_beauty:
                 _set_png(scene, depth)
-                path = os.path.join(folder, stem + "_clown.png")
+                path = os.path.join(folder, stem + "_beauty.png")
                 result.save_render(filepath=path, scene=scene)
-                # just under the beauty
-                layers.insert(1 if s.use_beauty else 0, (path, "Clown", False))
+                layers.append((path, "Beauty", True))
+
+            if need_exr:
+                exrs = sorted(glob.glob(os.path.join(folder, "_passes_*.exr")))
+                if not exrs:
+                    raise RuntimeError("The render passes were not written")
+                channels = _read_exr(exrs[-1])
+                for f in exrs:
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+                vl = view_layer.name
+                alpha = _find(channels, vl, "Combined.A")
+                if alpha is None:
+                    raise RuntimeError("No alpha in the render result")
+
+                for use, kind in ((s.use_clown_object, "Object"), (s.use_clown_material, "Material")):
+                    if not use:
+                        continue
+                    img = clown_image(channels, vl, kind, alpha, s.clown_aa)
+                    if img is None:
+                        raise RuntimeError("No Cryptomatte %s pass in the render result" % kind.lower())
+                    path = os.path.join(folder, "%s_clown_%s.png" % (stem, kind.lower()))
+                    _write_png(path, img, depth)
+                    layers.append((path, "Clown " + kind, False))
+
+                if s.use_depth:
+                    z = _find(channels, vl, "Depth.Z")
+                    if z is None:
+                        raise RuntimeError("No depth (Z) pass in the render result (%s)" % ", ".join(channels))
+                    if s.depth_range == 'CAMERA':
+                        cam = scene.camera.data
+                        near, far = cam.clip_start, cam.clip_end
+                    else:
+                        near, far = s.depth_near, s.depth_far
+                    values, used = depth_values(z, alpha, s.depth_range, near, far, s.depth_gamma, s.depth_invert,
+                                                mixed=mixed_pixels(channels, vl))
+                    if s.depth_range == 'AUTO':     # start Manual from what Auto found
+                        s.depth_near, s.depth_far = used
+                    path = os.path.join(folder, stem + "_depth.png")
+                    _write_png(path, values, depth)
+                    layers.append((path, "Depth", False))
+
+                if s.use_alpha:
+                    path = os.path.join(folder, stem + "_alpha.png")
+                    _write_png(path, alpha, depth)
+                    layers.append((path, "Alpha", False))
         finally:
-            for mat, color in materials:
-                mat.diffuse_color = color
             _restore(snap)
         return folder, layers
+
+
+class GTOOLS_OT_bridge_depth_from_selection(bpy.types.Operator):
+    """Set the depth Near / Far to the selected objects (distance along the camera's view)"""
+    bl_idname = "render.gtools_bridge_depth_from_selection"
+    bl_label = "Depth Range from Selection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.camera is not None and bool(context.selected_objects)
+
+    def execute(self, context):
+        rng = selection_depth_range(context.scene, context.selected_objects)
+        if rng is None or rng[1] <= 0.0:
+            self.report({'WARNING'}, "The selection is behind the camera")
+            return {'CANCELLED'}
+        s = _settings(context)
+        s.depth_range = 'MANUAL'
+        s.depth_near, s.depth_far = rng
+        return {'FINISHED'}
 
 
 # ---------------------------------------------------------------------------
@@ -502,22 +656,44 @@ class VIEW3D_PT_gtools_bridge(bpy.types.Panel):
         col = layout.column(align=True)
         row = col.row(align=True)
         row.prop(s, "use_beauty", toggle=True)
-        row.prop(s, "use_clown", toggle=True)
-        row = col.row(align=True)
-        row.prop(s, "use_depth", toggle=True)
         row.prop(s, "use_alpha", toggle=True)
+        row.prop(s, "use_depth", toggle=True)
+        row = col.row(align=True)
+        row.prop(s, "use_clown_object", text="Clown Object", toggle=True)
+        row.prop(s, "use_clown_material", text="Clown Material", toggle=True)
 
         col = layout.column()
         col.use_property_split = True
         col.use_property_decorate = False
         col.prop(s, "color_depth", expand=True)
         if s.use_clown:
-            col.prop(s, "clown_mode")
             col.prop(s, "clown_aa")
-        if s.use_depth:
-            col.prop(s, "depth_invert")
+            if context.scene.render.engine == 'BLENDER_WORKBENCH':
+                col.label(text="Clown needs EEVEE or Cycles", icon='ERROR')
         col.prop(s, "output_dir")
         col.prop(s, "open_photoshop")
+
+        if s.use_depth:
+            box = layout.box()
+            box.label(text="Depth", icon='MOD_THICKNESS')
+            bcol = box.column()
+            bcol.use_property_split = True
+            bcol.use_property_decorate = False
+            bcol.prop(s, "depth_range")
+            if s.depth_range == 'CAMERA' and context.scene.camera:
+                cam = context.scene.camera.data
+                sub = bcol.column(align=True)
+                sub.prop(cam, "clip_start", text="Near")
+                sub.prop(cam, "clip_end", text="Far")
+            else:
+                sub = bcol.column(align=True)
+                sub.active = s.depth_range == 'MANUAL'
+                sub.prop(s, "depth_near")
+                sub.prop(s, "depth_far")
+            bcol.prop(s, "depth_gamma")
+            bcol.prop(s, "depth_invert")
+            box.operator(GTOOLS_OT_bridge_depth_from_selection.bl_idname, text="Range from Selection",
+                         icon='RESTRICT_SELECT_OFF')
 
         cam = context.scene.camera
         row = layout.row()
@@ -532,7 +708,8 @@ class VIEW3D_PT_gtools_bridge(bpy.types.Panel):
                          icon='CAMERA_DATA')
 
 
-classes = (GTOOLS_BridgeSettings, GTOOLS_OT_photoshop_bridge, VIEW3D_PT_gtools_bridge)
+classes = (GTOOLS_BridgeSettings, GTOOLS_OT_photoshop_bridge, GTOOLS_OT_bridge_depth_from_selection,
+           VIEW3D_PT_gtools_bridge)
 
 
 def register():

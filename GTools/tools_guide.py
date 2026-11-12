@@ -109,11 +109,15 @@ GUIDE = (
         ("Hotkey cheatsheet", "Sidebar (N) > G-Tools (Viewport Cheatsheet option)",
          "Shows the main hotkeys as they are actually set."),
         ("Photoshop Bridge", "Sidebar (N) > G-Tools > Photoshop Bridge > Render to Photoshop",
-         "Renders the active camera and saves PNG passes (8 or 16 bit, transparent background) in a new "
-         "folder: Beauty (your engine and colour settings), Clown (flat random colour per object or per "
-         "material, hard edges by default, for Magic Wand selections), Depth (near = white, scaled to the "
-         "visible objects) and Alpha (object mask). Then Photoshop opens them as layers of one document "
-         "(Beauty on top, the others hidden) and saves a PSD next to the PNGs. Blender waits while it "
+         "Renders the active camera once and saves PNG passes (8 or 16 bit, transparent background) in a "
+         "new folder: Beauty (your engine and colour settings), Clown Object and Clown Material (a flat "
+         "random colour per object / per material, either or both; one exact colour per pixel for Magic "
+         "Wand selections unless Anti-Aliasing is on; alpha cut-outs and transparency match the beauty), "
+         "Depth (near = white) and Alpha (object mask). Depth range: Auto (nearest to farthest visible "
+         "point, and it fills Near / Far for you), Manual (Near / Far, or Range from Selection), or the "
+         "camera's clipping; Gamma shifts the contrast towards near or far, Invert swaps black and white. "
+         "Then Photoshop opens them as layers of one document (Beauty on top, the others hidden) and saves "
+         "a PSD next to the PNGs. Needs EEVEE or Cycles for the clown passes. Blender waits while it "
          "renders. Photoshop is found automatically; another path can be set in the preferences."),
         ("G TOOLS RENDER panel", "Properties > Render",
          "A panel with quick access to common render settings."),
