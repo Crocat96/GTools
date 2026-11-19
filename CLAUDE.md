@@ -75,6 +75,10 @@ operadores "smart" (extrude, bevel, delete, subdivision toggle…), dibujar prim
 - Atajos (`keymaps.py`): los nuevos van al keyconfig **addon**; los de Blender que chocan se desactivan en el
   keyconfig **user** y se restauran al cambiar ajustes o desactivar. Los modal maps van al **user** (Blender no
   admite modal en addon). `keymap_data.py` se generó comparando un export HEAVYPOLYLITE con el keymap de Blender 5.3.
+  Ctrl Space = pie de selección **solo** con Tab = Subdivision Toggle; con Selection Pie o Nothing se filtra en
+  `build_config` y vuelve el `screen.screen_full_area` (Toggle Maximize Area, keymap "Screen") de Blender.
+  En `--background` el keyconfig **default** está vacío: para comprobar qué atajos de Blender se desactivan,
+  probar con interfaz (timer + `wm.quit_blender`).
 
 ## Verificar cambios
 

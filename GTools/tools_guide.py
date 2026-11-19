@@ -20,7 +20,9 @@ GUIDE = (
          "Grease Pencil points and metaball elements too)."),
         ("Subdivision Toggle", "Tab (Tab Key option)",
          "Adds a Subdivision Surface modifier (level 3, named Subsurf_Base) to the selected objects, or "
-         "turns it on and off. The other Tab option opens the Select pie instead."),
+         "turns it on and off. The other Tab option opens the Select pie instead. Ctrl Space opens the "
+         "Select pie only while Tab is the Subdivision Toggle; with Selection Pie or Nothing it is "
+         "Blender's Toggle Maximize Area again."),
         ("Smart Slide / Push", "Shift G in Edit Mode",
          "Vertices and edges: slide along their edges as infinite lines, past the next vertex and past "
          "mesh borders (the opposite edge, extended). Faces: push them along their edges, so they ride "
@@ -37,7 +39,7 @@ GUIDE = (
          "change them; the Disabled Blender Hotkeys tab shows what they replace."),
     )),
     ("Pie menus", (
-        ("Select / Modes pie", "Ctrl Space (or Tab, set in Tab Key)",
+        ("Select / Modes pie", "Ctrl Space with Tab = Subdivision Toggle; Tab with Tab = Selection Pie",
          "Vert / Edge / Face (also enters Edit Mode), Object, and Sculpt / paint modes (Grease Pencil "
          "modes for Grease Pencil objects). Similar, Similar Name, Select Collection, Select Flat, Border, "
          "Split to New Object, Join, Set / Remove Parent. Also opens Modifier Scroll (Object Mode), Curve "

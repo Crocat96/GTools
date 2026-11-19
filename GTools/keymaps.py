@@ -278,7 +278,17 @@ def build_config(s):
             adds += option["add"]
             disables += option["disable"]
 
-    taken = {(km, _event_key(ev)) for km, _, ev, _ in adds}
+    # Ctrl Space opens the select pie only while Tab is the subdivision toggle. With Tab on
+    # the select pie, or on nothing, Ctrl Space goes back to Blender's Toggle Maximize Area.
+    if s.subdiv_key != 'TAB':
+        ctrl_space = _event_key(_ev('SPACE', ctrl=True))
+        adds = [a for a in adds
+                if not (a[1] == "wm.call_menu_pie" and _event_key(a[2]) == ctrl_space
+                        and (a[3] or {}).get("name") == 'Pie_Select')]
+        disables = [d for d in disables
+                    if not (d[1] == "screen.screen_full_area" and _event_key(d[2]) == ctrl_space)]
+
+    taken ={(km, _event_key(ev)) for km, _, ev, _ in adds}
     if s.style == 'GTOOLS':
         for km_name, ident, ev, props in GTOOLS_EXTRA:
             if (km_name, _event_key(ev)) not in taken:
@@ -535,9 +545,12 @@ class GTOOLS_AddonPreferences(bpy.types.AddonPreferences):
     subdiv_key: EnumProperty(
         name="Tab",
         items=(
-            ('TAB', "Subdivision Toggle", "Tab toggles subdivision (Edit Mode from the select pie)"),
-            ('SELECT_PIE', "Selection Pie", "Tab opens the selection pie (like Ctrl Space)"),
-            ('OFF', "Nothing (Vanilla)", "Tab toggles Edit Mode, as in Blender"),
+            ('TAB', "Subdivision Toggle",
+             "Tab toggles subdivision; Ctrl Space opens the select pie (Edit Mode from there)"),
+            ('SELECT_PIE', "Selection Pie",
+             "Tab opens the selection pie; Ctrl Space maximizes the area, as in Blender"),
+            ('OFF', "Nothing (Vanilla)",
+             "Tab toggles Edit Mode and Ctrl Space maximizes the area, as in Blender"),
         ),
         default='TAB', update=_update,
     )
