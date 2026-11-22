@@ -21,7 +21,9 @@ import bpy
 from .curve_patch import _Builder, _sock
 from .sharp_subtract import _set_input
 
-NODE_GROUP_NAME = "GT_EdgeDecal"
+# v2: hard edges made sharp in the modifier, smooth corner normals. Older groups in a
+# file are swapped for this one when Edge Decal is run on the object again.
+NODE_GROUP_NAME = "GT_EdgeDecal_v2"
 MODIFIER_NAME = "Edge Decal"
 
 
@@ -135,12 +137,21 @@ def _build_node_group():
     by_mark = boolean('AND', boolean('NOT', _sock(smooth.outputs, "Smooth")), out["Use Sharp Edges"])
     hard = boolean('AND', boolean('OR', by_angle, by_mark), _sock(two.outputs, "Result"))
 
+    # The edges that get decals are made sharp on the object itself (inside the
+    # modifier), so its shading breaks there whatever smoothing it uses (Shade Smooth,
+    # Shade Auto Smooth...). The decal normals are read from this version.
+    sharpened = b.node('GeometryNodeSetShadeSmooth', domain='EDGE')
+    b.link(geo, _sock(sharpened.inputs, "Mesh"))
+    b.link(hard, _sock(sharpened.inputs, "Selection"))
+    _sock(sharpened.inputs, "Shade Smooth").default_value = False
+    geo_sharp = _sock(sharpened.outputs, "Mesh")
+
     # Mitres: where the next edge of the same face is hard too, the strip's inner side
     # is cut back by width / tan(corner angle / 2), so both strips meet on the bisector
     # instead of overlapping (and flickering).
-    def sample(domain, data_type, value, index):
+    def sample(domain, data_type, value, index, source=None):
         n = b.node('GeometryNodeSampleIndex', domain=domain, data_type=data_type)
-        b.link(geo, _sock(n.inputs, "Geometry"))
+        b.link(source if source is not None else geo, _sock(n.inputs, "Geometry"))
         stype = {'FLOAT_VECTOR': 'VECTOR', 'FLOAT': 'VALUE', 'BOOLEAN': 'BOOLEAN'}[data_type]
         b.link(value, _sock(n.inputs, "Value", stype))
         b.link(index, _sock(n.inputs, "Index"))
@@ -203,7 +214,7 @@ def _build_node_group():
         corner_normals = []
         for c in (c_a, c_b):
             nn = b.node('GeometryNodeInputNormal')
-            corner_normals.append(sample('CORNER', 'FLOAT_VECTOR', nn.outputs[0], c))
+            corner_normals.append(sample('CORNER', 'FLOAT_VECTOR', nn.outputs[0], c, geo_sharp))
         n_ca, n_cb = corner_normals
         smooth_normals.append((b.switch('VECTOR', a_is_1, n_cb, n_ca), b.switch('VECTOR', a_is_1, n_ca, n_cb)))
 
@@ -341,7 +352,7 @@ def _build_node_group():
     b.column(600)
     final = b.node('GeometryNodeJoinGeometry')
     b.link(_sock(clean.outputs, "Geometry"), final.inputs[0])
-    b.link(geo, final.inputs[0])
+    b.link(geo_sharp, final.inputs[0])
     gout = b.node('NodeGroupOutput')
     b.link(final.outputs[0], gout.inputs[0])
     return ng
@@ -373,19 +384,55 @@ class GTOOLS_OT_edge_decal(bpy.types.Operator):
 
     def execute(self, context):
         ng = get_node_group()
-        added = 0
+        added = updated = 0
         for obj in context.selected_objects:
-            if obj.type != 'MESH' or any(m.type == 'NODES' and m.node_group is ng for m in obj.modifiers):
+            if obj.type != 'MESH':
+                continue
+            mod = next((m for m in obj.modifiers if m.type == 'NODES' and m.node_group is not None
+                        and m.node_group.name.startswith("GT_EdgeDecal")), None)
+            if mod is not None:
+                if mod.node_group is not ng:  # made by an older version: same settings, new group
+                    values = {}
+                    old = mod.node_group
+                    for name in ("Width", "Angle", "Use Sharp Edges", "Concave Edges", "Offset"):
+                        try:
+                            values[name] = _get_input(mod, _input_id(old, name))
+                        except KeyError:
+                            pass
+                    mod.node_group = ng
+                    for name, value in values.items():
+                        _set_input(mod, _input_id(ng, name), value)
+                    updated += 1
+                _put_last(obj, mod)
                 continue
             mod = obj.modifiers.new(MODIFIER_NAME, 'NODES')
             mod.node_group = ng
             size = max(obj.dimensions) or 1.0
             _set_input(mod, _input_id(ng, "Width"), size * 0.01)
             _set_input(mod, _input_id(ng, "Offset"), size * 0.0002)
+            _put_last(obj, mod)
             added += 1
-        if not added:
+        if updated:
+            self.report({'INFO'}, f"Edge Decal: updated on {updated} object(s)")
+        elif not added:
             self.report({'INFO'}, "Edge Decal: the selected objects already have it")
         return {'FINISHED'}
+
+
+def _get_input(mod, identifier):
+    props = getattr(mod, "properties", None)
+    socket = getattr(getattr(props, "inputs", None), identifier, None)
+    return socket.value if socket is not None else mod[identifier]
+
+
+def _put_last(obj, mod):
+    """Last in the stack, after modifiers pinned to last (Smooth by Angle from Shade
+    Auto Smooth): it has to see the object's final shading and edges."""
+    if hasattr(mod, "use_pin_to_last"):
+        mod.use_pin_to_last = True
+    index = obj.modifiers.find(mod.name)
+    if index != len(obj.modifiers) - 1:
+        obj.modifiers.move(index, len(obj.modifiers) - 1)
 
 
 def register():

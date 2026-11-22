@@ -109,7 +109,7 @@ GUIDE = (
         ("Edge Decal", "Boolean pie: select the object(s)",
          "Fake bevels on every hard edge, non-destructively: thin floating strips on both sides of each "
          "edge whose normals round the corner, so it shades like a bevel while the silhouette stays sharp. "
-         "Added last in the stack, so boolean cuts get them too; strips meeting at a corner are mitred. "
+         "Added last in the stack (after Smooth by Angle too), so boolean cuts get them; those edges are made sharp inside the modifier so the shading breaks there; strips meeting at a corner are mitred. Running it again on an object updates an older decal. "
          "The modifier sets Width, Angle (which edges count as hard), Use Sharp Edges, Concave Edges "
          "and Offset."),
     )),
