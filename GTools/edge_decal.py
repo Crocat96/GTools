@@ -41,8 +41,9 @@ def _build_node_group():
     s.default_value, s.min_value, s.max_value, s.subtype = math.radians(30), 0.0, math.pi, 'ANGLE'
     s = iface.new_socket("Use Sharp Edges", in_out='INPUT', socket_type='NodeSocketBool')
     s.default_value = True
+    # Off by default: on inside corners the fake rounding reads as a raised bead.
     s = iface.new_socket("Concave Edges", in_out='INPUT', socket_type='NodeSocketBool')
-    s.default_value = True
+    s.default_value = False
     s = iface.new_socket("Offset", in_out='INPUT', socket_type='NodeSocketFloat')
     s.default_value, s.min_value, s.subtype = 0.0004, 0.0, 'DISTANCE'
 
@@ -133,9 +134,12 @@ def _build_node_group():
 
     smooth = b.node('GeometryNodeInputEdgeSmooth')
     side_ok = boolean('OR', _sock(convex.outputs, "Result"), out["Concave Edges"])
-    by_angle = boolean('AND', _sock(steep.outputs, "Result"), side_ok)
     by_mark = boolean('AND', boolean('NOT', _sock(smooth.outputs, "Smooth")), out["Use Sharp Edges"])
-    hard = boolean('AND', boolean('OR', by_angle, by_mark), _sock(two.outputs, "Result"))
+    # The convex / concave filter applies to edges found either way (Smooth by Angle
+    # marks every hard edge sharp, so filtering only the angle test let concave edges
+    # through).
+    hard = boolean('AND', boolean('AND', boolean('OR', _sock(steep.outputs, "Result"), by_mark), side_ok),
+                   _sock(two.outputs, "Result"))
 
     # The edges that get decals are made sharp on the object itself (inside the
     # modifier), so its shading breaks there whatever smoothing it uses (Shade Smooth,
@@ -372,7 +376,10 @@ def _build_node_group():
 # Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
 # get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
 # otherwise they would keep the old tree forever (it is reused by name).
-GROUP_VERSION = 3
+GROUP_VERSION = 4
+# Inputs whose saved value is dropped when upgrading from older versions (they had
+# no effect there, so the new default applies): {input name: first version it worked}.
+_RESET_BEFORE = {"Concave Edges": 4}
 VERSION_KEY = "gt_edge_decal_version"
 
 
@@ -404,8 +411,16 @@ def _swap_group(old, new):
             if mod.type != 'NODES' or mod.node_group is not old:
                 continue
             values = {}
+            old_version = old.get(VERSION_KEY, 0)
             for item in old.interface.items_tree:
                 if item.item_type == 'SOCKET' and item.in_out == 'INPUT' and item.socket_type != 'NodeSocketGeometry':
+                    if old_version < _RESET_BEFORE.get(item.name, 0):
+                        # the modifier would keep its stored value by itself: set the new default
+                        new_item = next((i for i in new.interface.items_tree if i.item_type == 'SOCKET'
+                                         and i.in_out == 'INPUT' and i.name == item.name), None)
+                        if new_item is not None:
+                            values[item.name] = new_item.default_value
+                        continue
                     try:
                         values[item.name] = _get_input(mod, item.identifier)
                     except (KeyError, AttributeError, TypeError):
