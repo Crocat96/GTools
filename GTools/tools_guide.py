@@ -106,6 +106,12 @@ GUIDE = (
          "screw still looks round). Height, offset and how the border blends in can be adjusted."),
         ("Panel Line", "Boolean pie: select a cutter, then the target",
          "A live panel line along where the cutter meets the surface, with a fake V-groove in the normals."),
+        ("Edge Decal", "Boolean pie: select the object(s)",
+         "Fake bevels on every hard edge, non-destructively: thin floating strips on both sides of each "
+         "edge whose normals round the corner, so it shades like a bevel while the silhouette stays sharp. "
+         "Added last in the stack, so boolean cuts get them too; strips meeting at a corner are mitred. "
+         "The modifier sets Width, Angle (which edges count as hard), Use Sharp Edges, Concave Edges "
+         "and Offset."),
     )),
     ("Viewport and render", (
         ("Hotkey cheatsheet", "Sidebar (N) > G-Tools (Viewport Cheatsheet option)",

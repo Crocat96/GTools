@@ -64,6 +64,9 @@ class HP_MT_pie_boolean(Menu):
         row = col.row(align=True)
         row.scale_y=1.5
         row.operator("object.gtools_panel_line", text="Panel Line")
+        row = col.row(align=True)
+        row.scale_y=1.5
+        row.operator("object.gtools_edge_decal", text="Edge Decal")
 
         #Live Booleans
         split = pie.split()
