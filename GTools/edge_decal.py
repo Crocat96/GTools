@@ -365,14 +365,78 @@ def _build_node_group():
     b.link(geo_sharp, final.inputs[0])
     gout = b.node('NodeGroupOutput')
     b.link(final.outputs[0], gout.inputs[0])
+    ng[VERSION_KEY] = GROUP_VERSION
     return ng
 
 
+# Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
+# get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
+# otherwise they would keep the old tree forever (it is reused by name).
+GROUP_VERSION = 3
+VERSION_KEY = "gt_edge_decal_version"
+
+
+def _is_edge_decal_group(ng):
+    return ng.bl_idname == 'GeometryNodeTree' and ng.name.startswith("GT_EdgeDecal")
+
+
 def get_node_group():
+    """The current GT_EdgeDecal group: reused if up to date, otherwise built fresh and
+    swapped in for every older Edge Decal group in the file (modifier settings kept:
+    the inputs keep their identifiers)."""
     ng = bpy.data.node_groups.get(NODE_GROUP_NAME)
-    if ng is not None and ng.bl_idname == 'GeometryNodeTree':
+    if ng is not None and _is_edge_decal_group(ng) and ng.get(VERSION_KEY, 0) >= GROUP_VERSION:
         return ng
-    return _build_node_group()
+    olds = [g for g in bpy.data.node_groups if _is_edge_decal_group(g) and g.get(VERSION_KEY, 0) < GROUP_VERSION]
+    for old in olds:
+        old.name = old.name + "_outdated"
+    new = _build_node_group()
+    new.name = NODE_GROUP_NAME
+    for old in olds:
+        _swap_group(old, new)
+    return new
+
+
+def _swap_group(old, new):
+    """Point every modifier using `old` to `new`, keeping their input values."""
+    for obj in bpy.data.objects:
+        for mod in getattr(obj, "modifiers", []):
+            if mod.type != 'NODES' or mod.node_group is not old:
+                continue
+            values = {}
+            for item in old.interface.items_tree:
+                if item.item_type == 'SOCKET' and item.in_out == 'INPUT' and item.socket_type != 'NodeSocketGeometry':
+                    try:
+                        values[item.name] = _get_input(mod, item.identifier)
+                    except (KeyError, AttributeError, TypeError):
+                        pass
+            mod.node_group = new
+            for name, value in values.items():
+                try:
+                    _set_input(mod, _input_id(new, name), value)
+                except (KeyError, AttributeError, TypeError):
+                    pass
+    if old.users == 0:
+        bpy.data.node_groups.remove(old)
+
+
+def upgrade_file():
+    """Swap outdated Edge Decal groups in the open file (no-op if there are none)."""
+    if any(_is_edge_decal_group(g) and g.get(VERSION_KEY, 0) < GROUP_VERSION for g in bpy.data.node_groups):
+        get_node_group()
+
+
+@bpy.app.handlers.persistent
+def _on_load(_dummy):
+    upgrade_file()
+
+
+def _deferred_upgrade():
+    try:
+        upgrade_file()
+    except Exception as ex:  # never break enabling the add-on
+        print(f"G-Tools Edge Decal upgrade: {ex}")
+    return None
 
 
 def _input_id(ng, name):
@@ -447,7 +511,16 @@ def _put_last(obj, mod):
 
 def register():
     bpy.utils.register_class(GTOOLS_OT_edge_decal)
+    if _on_load not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load)
+    # the file already open (enabling or updating the add-on): bpy.data isn't
+    # writable during registration, so do it right after
+    bpy.app.timers.register(_deferred_upgrade, first_interval=0.1)
 
 
 def unregister():
+    if _on_load in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load)
+    if bpy.app.timers.is_registered(_deferred_upgrade):
+        bpy.app.timers.unregister(_deferred_upgrade)
     bpy.utils.unregister_class(GTOOLS_OT_edge_decal)
