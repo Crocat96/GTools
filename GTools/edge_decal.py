@@ -177,10 +177,20 @@ def _build_node_group():
         b.link(t, dot.inputs[0])
         b.link(u, dot.inputs[1])
         cos = math_op('MAXIMUM', math_op('MINIMUM', _sock(dot.outputs, "Value"), 1.0), -1.0)
-        tan_half = math_op('MAXIMUM', math_op('TANGENT', math_op('MULTIPLY', math_op('ARCCOSINE', cos), 0.5)), 0.05)
-        shift = math_op('MINIMUM', math_op('DIVIDE', out["Width"], tan_half), math_op('MULTIPLY', length, 0.5))
+        sin = math_op('MAXIMUM', math_op('SQRT', math_op('SUBTRACT', 1.0, math_op('MULTIPLY', cos, cos))), 0.05)
+        # The other edge of this face at the vertex decides where the strip's inner
+        # side ends:
+        #  - hard: another strip lies on this face too -> meet on the bisector,
+        #    cut back by width * cot(angle / 2) = width * (1 + cos) / sin;
+        #  - smooth: the strip carries on, on the next face -> end exactly on that edge,
+        #    width * cot(angle) = width * cos / sin (0 when square, negative = longer),
+        #    so strips on faces of a rounded surface meet on the edge between them.
         other_hard = sample('EDGE', 'BOOLEAN', hard, other_edge)
-        return math_op('MULTIPLY', shift, other_hard)
+        mitre = math_op('DIVIDE', math_op('MULTIPLY', out["Width"], math_op('ADD', 1.0, cos)), sin)
+        along = math_op('DIVIDE', math_op('MULTIPLY', out["Width"], cos), sin)
+        shift = b.switch('FLOAT', other_hard, along, mitre)
+        shift = math_op('MINIMUM', shift, math_op('MULTIPLY', length, 0.5))
+        return math_op('MAXIMUM', shift, math_op('MULTIPLY', out["Width"], -2.0))
 
     b.column(-1050)
     shifts, smooth_normals = [], []
