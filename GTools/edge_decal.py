@@ -9,7 +9,9 @@ sharp. It sits last in the stack, so edges made by booleans get decals too.
 
 Where two hard edges of the same face meet, both strips are mitred on the bisector
 (their inner side is cut back by width / tan(corner angle / 2)) so they don't overlap.
-Strips are wound to face like the face under them. Inputs on the modifier: Width,
+Strips are wound to face like the face under them. Normals and lifts use the mesh's
+own (corner) normals at each end, which neighbouring strips share, so along smooth
+curved edges (a cylinder's rim) the rounding runs on with no steps or cracks. Inputs on the modifier: Width,
 Angle (hard edge threshold), Use Sharp Edges (edges marked sharp count too), Concave
 Edges, Offset (how far they float).
 """
@@ -170,7 +172,7 @@ def _build_node_group():
         return math_op('MULTIPLY', shift, other_hard)
 
     b.column(-1050)
-    shifts = []
+    shifts, smooth_normals = [], []
     for k in (0, 1):
         c_a = corners[k]
         nxt = b.node('GeometryNodeOffsetCornerInFace')
@@ -196,6 +198,14 @@ def _build_node_group():
         b.link(direction, dot.inputs[1])
         a_is_1 = math_op('LESS_THAN', _sock(dot.outputs, "Value"), 0.0)
         shifts.append((b.switch('FLOAT', a_is_1, shift_b, shift_a), b.switch('FLOAT', a_is_1, shift_a, shift_b)))
+        # The mesh's own normals at both ends on this face (corner normals: smooth
+        # across smooth edges), so strips follow smooth shading instead of faceting it.
+        corner_normals = []
+        for c in (c_a, c_b):
+            nn = b.node('GeometryNodeInputNormal')
+            corner_normals.append(sample('CORNER', 'FLOAT_VECTOR', nn.outputs[0], c))
+        n_ca, n_cb = corner_normals
+        smooth_normals.append((b.switch('VECTOR', a_is_1, n_cb, n_ca), b.switch('VECTOR', a_is_1, n_ca, n_cb)))
 
     # Edge data onto the mesh (a copy for the decals), then one point per hard edge
     b.column(-900)
@@ -207,6 +217,10 @@ def _build_node_group():
     for k in (0, 1):
         g = store(g, f"gt_ed_s1{k}", shifts[k][0], 'EDGE', 'FLOAT')
         g = store(g, f"gt_ed_s2{k}", shifts[k][1], 'EDGE', 'FLOAT')
+        g = store(g, f"gt_ed_m{k}1", smooth_normals[k][0], 'EDGE')
+        g = store(g, f"gt_ed_m{k}2", smooth_normals[k][1], 'EDGE')
+    for end in (1, 2):  # at the edge itself both strips share this normal
+        g = store(g, f"gt_ed_e{end}", normalize(b.vec('ADD', smooth_normals[0][end - 1], smooth_normals[1][end - 1])), 'EDGE')
     m2p = b.node('GeometryNodeMeshToPoints', mode='EDGES')
     b.link(g, _sock(m2p.inputs, "Mesh"))
     b.link(hard, _sock(m2p.inputs, "Selection"))
@@ -232,6 +246,8 @@ def _build_node_group():
         pts = store(points, "gt_ed_nf", named(f"gt_ed_n{k}"), 'POINT')
         pts = store(pts, "gt_ed_sa", named(f"gt_ed_s1{k}", 'FLOAT'), 'POINT', 'FLOAT')
         pts = store(pts, "gt_ed_sb", named(f"gt_ed_s2{k}", 'FLOAT'), 'POINT', 'FLOAT')
+        pts = store(pts, "gt_ed_mf1", named(f"gt_ed_m{k}1"), 'POINT')
+        pts = store(pts, "gt_ed_mf2", named(f"gt_ed_m{k}2"), 'POINT')
         rot = b.node('FunctionNodeAxesToRotation', primary_axis='X', secondary_axis='Y')
         b.link(named("gt_ed_dir"), _sock(rot.inputs, "Primary Axis"))
         b.link(named(f"gt_ed_d{k}"), _sock(rot.inputs, "Secondary Axis"))
@@ -252,15 +268,36 @@ def _build_node_group():
     join = b.node('GeometryNodeJoinGeometry')
     for h in reversed(halves):
         b.link(h, join.inputs[0])
-    # Normals: edge normal at the edge, the face's normal at the inner side
-    nrm = normalize(b.lerp(named("gt_ed_ne"), named("gt_ed_nf"), named("gt_ed_t", 'FLOAT')))
-    lift = b.node('ShaderNodeVectorMath', operation='SCALE')
-    b.link(named("gt_ed_nf"), lift.inputs[0])
-    b.link(out["Offset"], _sock(lift.inputs, "Scale"))
-    # mitre: inner corners slide along the edge (vertex-1 end forwards, vertex-2 end back)
-    at_1 = b.node('ShaderNodeMath', operation='LESS_THAN')
+    at_1 = b.node('ShaderNodeMath', operation='LESS_THAN')  # vertex at the edge's vertex-1 end
     b.link(named("gt_ed_x", 'FLOAT'), at_1.inputs[0])
     at_1.inputs[1].default_value = 0.0
+    # Normals: at the edge, the average of both faces' (smooth) normals there; at the
+    # inner side, this face's normal there. Neighbouring strips share them, so the
+    # rounding runs on without steps along curved edges.
+    n_edge = b.switch('VECTOR', at_1.outputs[0], named("gt_ed_e2"), named("gt_ed_e1"))
+    n_face = b.switch('VECTOR', at_1.outputs[0], named("gt_ed_mf2"), named("gt_ed_mf1"))
+    nrm = normalize(b.lerp(n_edge, n_face, named("gt_ed_t", 'FLOAT')))
+    # Lift (float above the surface) along normals the neighbouring strips share, so
+    # they meet exactly instead of leaving hairline cracks where the edge shows through:
+    # at the edge along the edge normal, far enough to clear both faces by Offset; at
+    # the inner side along the mesh's normal there.
+    cos_half = b.node('ShaderNodeVectorMath', operation='DOT_PRODUCT')
+    b.link(n_edge, cos_half.inputs[0])
+    b.link(n_face, cos_half.inputs[1])
+    clamp = b.node('ShaderNodeMath', operation='MAXIMUM')
+    b.link(_sock(cos_half.outputs, "Value"), clamp.inputs[0])
+    clamp.inputs[1].default_value = 0.2
+    edge_lift = b.node('ShaderNodeMath', operation='DIVIDE')
+    b.link(out["Offset"], edge_lift.inputs[0])
+    b.link(clamp.outputs[0], edge_lift.inputs[1])
+    at_edge = b.node('ShaderNodeVectorMath', operation='SCALE')
+    b.link(n_edge, at_edge.inputs[0])
+    b.link(edge_lift.outputs[0], _sock(at_edge.inputs, "Scale"))
+    at_inner = b.node('ShaderNodeVectorMath', operation='SCALE')
+    b.link(n_face, at_inner.inputs[0])
+    b.link(out["Offset"], _sock(at_inner.inputs, "Scale"))
+    lift_v = b.lerp(_sock(at_edge.outputs, "Vector"), _sock(at_inner.outputs, "Vector"), named("gt_ed_t", 'FLOAT'))
+    # mitre: inner corners slide along the edge (vertex-1 end forwards, vertex-2 end back)
     back = b.node('ShaderNodeMath', operation='MULTIPLY')
     b.link(named("gt_ed_sb", 'FLOAT'), back.inputs[0])
     back.inputs[1].default_value = -1.0
@@ -273,7 +310,7 @@ def _build_node_group():
     b.link(slide_t.outputs[0], _sock(along.inputs, "Scale"))
     setpos = b.node('GeometryNodeSetPosition')
     b.link(join.outputs[0], _sock(setpos.inputs, "Geometry"))
-    b.link(b.vec('ADD', _sock(lift.outputs, "Vector"), _sock(along.outputs, "Vector")), _sock(setpos.inputs, "Offset"))
+    b.link(b.vec('ADD', lift_v, _sock(along.outputs, "Vector")), _sock(setpos.inputs, "Offset"))
     b.column(300)
     # Strips must face the same way as the face under them (their winding depends on
     # which of the edge's two faces they lie on); back-facing ones would shade dark.
