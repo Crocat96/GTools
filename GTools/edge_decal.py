@@ -302,9 +302,10 @@ def _build_node_group():
     # Unit strips: X along the edge (-0.5..0.5), Y inwards (0..1); gt_ed_t = Y,
     # gt_ed_x = X, gt_ed_cols = number of columns. Smooth: 4 columns x 2 rows (two
     # of the columns get placed one width in from each end, so a corner's rounding
-    # stays near the corner). Worn: 5 rows and 4, 8, ... 1024 columns, each edge
-    # picking the one whose columns are about as far apart as the rows (scaled by
-    # Wear Detail), so its triangles are even (a decimated look) on any edge length.
+    # stays near the corner). Worn: 3 rows (the middle one jittered a lot) and 4, 8,
+    # ... 1024 columns, each edge picking the one whose columns are about a width
+    # apart (scaled by Wear Detail): few, big, irregular triangles (a decimated look)
+    # on any edge length.
     b.column(-600)
     worn = b.node('FunctionNodeCompare', data_type='FLOAT', operation='GREATER_THAN')
     b.link(out["Wear"], _sock(worn.inputs, "A", 'VALUE'))
@@ -329,14 +330,15 @@ def _build_node_group():
 
     WORN_COLS = [4 << i for i in range(9)]          # 4 .. 1024
     to_inst = b.node('GeometryNodeGeometryToInstance')
-    strips = [template(4, 2)] + [template(c, 5) for c in WORN_COLS]
+    strips = [template(4, 2)] + [template(c, 3) for c in WORN_COLS]
     # (the multi-input lists the newest link first: link them backwards)
     for st in reversed(strips):
         b.link(st, to_inst.inputs[0])
     strip = _sock(to_inst.outputs, "Instances")
-    # columns wanted on this edge: length / (width / 4), x Wear Detail / 64
+    # columns wanted on this edge: about one per width (x Wear Detail / 64): few,
+    # big triangles, like a decimated mesh
     want = math_op('DIVIDE', math_op('MULTIPLY', named("gt_ed_len", 'FLOAT'), out["Wear Detail"]),
-                   math_op('MAXIMUM', math_op('MULTIPLY', out["Width"], 16.0), 1e-6))
+                   math_op('MAXIMUM', math_op('MULTIPLY', out["Width"], 64.0), 1e-6))
     level = math_op('SUBTRACT', math_op('CEIL', math_op('LOGARITHM', math_op('MAXIMUM', want, 4.0), 2.0)), 2.0)
     level = math_op('MINIMUM', level, float(len(WORN_COLS) - 1))
     pick = b.switch('INT', is_worn, 0, math_op('ADD', level, 1.0))
@@ -388,7 +390,7 @@ def _build_node_group():
     inner_x = math_op('LESS_THAN', math_op('ABSOLUTE', gx), 0.499)
     inner_t = math_op('MULTIPLY', math_op('GREATER_THAN', gt, 0.001), math_op('LESS_THAN', gt, 0.999))
     jx = math_op('MULTIPLY', jitter(11, col_step), math_op('MULTIPLY', inner_x, worn_f))
-    jt = math_op('MULTIPLY', jitter(23, 0.12), math_op('MULTIPLY', inner_t, worn_f))
+    jt = math_op('MULTIPLY', jitter(23, 0.3), math_op('MULTIPLY', inner_t, worn_f))
     joined = store(join.outputs[0], "gt_ed_x", math_op('ADD', gx, jx), 'POINT', 'FLOAT')
     joined = store(joined, "gt_ed_t", math_op('ADD', gt, jt), 'POINT', 'FLOAT')
     t_in = named("gt_ed_t", 'FLOAT')        # 0 at the edge, 1 at the inner side
@@ -578,7 +580,7 @@ def _build_node_group():
 # Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
 # get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
 # otherwise they would keep the old tree forever (it is reused by name).
-GROUP_VERSION = 15
+GROUP_VERSION = 16
 # Inputs whose saved value is dropped when upgrading from older versions (they had
 # no effect there, so the new default applies): {input name: first version it worked}.
 _RESET_BEFORE = {"Concave Edges": 4}

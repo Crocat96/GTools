@@ -113,7 +113,7 @@ GUIDE = (
          "The modifier sets Width, Angle (which edges count as hard), Use Sharp Edges, Concave Edges "
          "(off by default: on inside corners the fake rounding reads as a raised bead) and Offset. "
          "Wear (0 = smooth) gives a concrete-like worn edge: the bevel gets chipped and rough; Wear Scale "
-         "sets the size of the chips, Wear Sharpness how angular they are (0 soft; 1 decimated: the bevel turns into flat, irregular low-poly triangles and each broken piece is a flat 45-degree chamfer with a jagged outline) and Wear Detail the triangle density (the same on short and long edges; lower it on heavy scenes). Corners where three "
+         "sets the size of the chips, Wear Sharpness how angular they are (0 soft; 1 decimated: the bevel turns into a few big, flat, irregular triangles and each broken piece is a flat 45-degree chamfer with a jagged outline) and Wear Detail the triangle density (64 = about one triangle pair per Width along the edge, the same on short and long edges). Corners where three "
          "hard edges meet round off like a real rounded box."),
     )),
     ("Viewport and render", (
