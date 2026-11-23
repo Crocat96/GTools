@@ -446,24 +446,26 @@ def _build_node_group():
     bite = scaled(named("gt_ed_df"), math_op('MULTIPLY', math_op('MULTIPLY', strip_width, chip), math_op('MULTIPLY', t_in, -1.0)))
     # Normals. Soft wear: per-point noise that fades out towards the face (blurry).
     # Sharp wear: each face of the strip takes the cell under its centre (stored per
-    # face before moving, gt_ed_cf); faces of a chipped cell get ONE flat, tilted
-    # normal (constant over the face, set per corner), so a chip is a crisp facet with
-    # a hard break to the intact bevel around it; intact faces stay smooth.
+    # face, gt_ed_cf). A chipped cell is a flat chamfer: its faces all get the edge's
+    # bisector normal (45 deg on a right-angle edge), constant over the face (set per
+    # corner) with only a slight tilt of its own, so the break reads as a flat facet
+    # with a hard break to the rounded, intact bevel around it.
     soft_tilt = scaled(b.vec('SUBTRACT', _sock(noise.outputs, "Color"), (0.5, 0.5, 0.5)),
                        math_op('SUBTRACT', 1.0, t_in))
     cf = named("gt_ed_cf")
     cf_rgb = b.node('ShaderNodeSeparateXYZ')
     b.link(cf, cf_rgb.inputs[0])
     broken_f = math_op('GREATER_THAN', cf_rgb.outputs[0], 0.6)
-    facet_tilt = scaled(b.vec('SUBTRACT', cf, (0.5, 0.5, 0.5)), math_op('MULTIPLY', broken_f, 1.6))
-    # sharp = 1 still keeps a little grain on the intact parts
-    soft_amount = math_op('SUBTRACT', 1.0, math_op('MULTIPLY', sharp, 0.8))
-    tilt = b.vec('ADD', scaled(soft_tilt, soft_amount), scaled(facet_tilt, sharp))
+    facet_on = math_op('MULTIPLY', math_op('MULTIPLY', broken_f, sharp), math_op('MINIMUM', math_op('MULTIPLY', out["Wear"], 1e4), 1.0))
+    facet_tilt = scaled(b.vec('SUBTRACT', cf, (0.5, 0.5, 0.5)), math_op('MULTIPLY', facet_on, 0.25))
+    # sharp = 1 keeps a little grain on the intact parts, none on the chamfers
+    soft_amount = math_op('MULTIPLY', math_op('SUBTRACT', 1.0, math_op('MULTIPLY', sharp, 0.8)),
+                          math_op('SUBTRACT', 1.0, facet_on))
+    tilt = b.vec('ADD', scaled(soft_tilt, soft_amount), facet_tilt)
     rough = scaled(tilt, math_op('MULTIPLY', out["Wear"], 1.2))
     flat = b.node('GeometryNodeFieldOnDomain', domain='FACE', data_type='FLOAT_VECTOR')
-    b.link(nrm_smooth, _sock(flat.inputs, "Value", 'VECTOR'))
-    facet_on = math_op('MULTIPLY', math_op('MULTIPLY', broken_f, sharp), math_op('MINIMUM', math_op('MULTIPLY', out["Wear"], 1e4), 1.0))
-    base = b.lerp(nrm_smooth, _sock(flat.outputs, "Value", 'VECTOR'), facet_on)
+    b.link(n_edge, _sock(flat.inputs, "Value", 'VECTOR'))
+    base = b.lerp(nrm_smooth, normalize(_sock(flat.outputs, "Value", 'VECTOR')), facet_on)
     nrm = normalize(b.vec('ADD', base, rough))
     # Lift (float above the surface) along normals the neighbouring strips share, so
     # they meet exactly instead of leaving hairline cracks where the edge shows through:
@@ -544,7 +546,7 @@ def _build_node_group():
 # Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
 # get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
 # otherwise they would keep the old tree forever (it is reused by name).
-GROUP_VERSION = 12
+GROUP_VERSION = 13
 # Inputs whose saved value is dropped when upgrading from older versions (they had
 # no effect there, so the new default applies): {input name: first version it worked}.
 _RESET_BEFORE = {"Concave Edges": 4}
