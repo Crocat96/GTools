@@ -302,7 +302,7 @@ def _build_node_group():
     # A unit strip: X along the edge (-0.5..0.5), Y inwards (0..1); gt_ed_t = Y
     b.column(-600)
     grid = b.node('GeometryNodeMeshGrid')
-    for name, val in (("Size X", 1.0), ("Size Y", 1.0), ("Vertices Y", 2)):
+    for name, val in (("Size X", 1.0), ("Size Y", 1.0)):
         _sock(grid.inputs, name).default_value = val
     # Columns along the edge: smooth = 4 (two of them get placed one width in from
     # each end, so a corner's rounding stays near the corner); worn = Wear Detail.
@@ -311,6 +311,8 @@ def _build_node_group():
     _sock(worn.inputs, "B", 'VALUE').default_value = 0.0
     is_worn = _sock(worn.outputs, "Result")
     b.link(b.switch('INT', is_worn, 4, out["Wear Detail"]), _sock(grid.inputs, "Vertices X"))
+    # Rows across: 2 when smooth; worn, 5 so chips get facets across the strip too.
+    b.link(b.switch('INT', is_worn, 2, 5), _sock(grid.inputs, "Vertices Y"))
     move = b.node('GeometryNodeTransform')
     b.link(_sock(grid.outputs, "Mesh"), _sock(move.inputs, "Geometry"))
     _sock(move.inputs, "Translation").default_value = (0.0, 0.5, 0.0)
@@ -421,13 +423,27 @@ def _build_node_group():
                    out["Wear"])
     strip_width = math_op('MULTIPLY', out["Width"], named("gt_ed_ff", 'FLOAT'))
     bite = scaled(named("gt_ed_df"), math_op('MULTIPLY', math_op('MULTIPLY', strip_width, chip), math_op('MULTIPLY', t_in, -1.0)))
-    soft_tilt = b.vec('SUBTRACT', _sock(noise.outputs, "Color"), (0.5, 0.5, 0.5))
-    facet_tilt = b.vec('SUBTRACT', _sock(cells.outputs, "Color"), (0.5, 0.5, 0.5))
-    tilt = b.lerp(soft_tilt, facet_tilt, sharp)
-    # soft: fades out towards the face; sharp: a chip's facet keeps its tilt further in
-    fade = math_op('SUBTRACT', 1.0, math_op('MULTIPLY', t_in, math_op('SUBTRACT', 1.0, math_op('MULTIPLY', sharp, 0.5))))
-    rough = scaled(tilt, math_op('MULTIPLY', math_op('MULTIPLY', out["Wear"], 1.2), fade))
-    nrm = normalize(b.vec('ADD', nrm_smooth, rough))
+    # Normals. Soft wear: per-point noise that fades out towards the face (blurry).
+    # Sharp wear: each face of the strip takes the cell under its centre (stored per
+    # face before moving, gt_ed_cf); faces of a chipped cell get ONE flat, tilted
+    # normal (constant over the face, set per corner), so a chip is a crisp facet with
+    # a hard break to the intact bevel around it; intact faces stay smooth.
+    soft_tilt = scaled(b.vec('SUBTRACT', _sock(noise.outputs, "Color"), (0.5, 0.5, 0.5)),
+                       math_op('SUBTRACT', 1.0, t_in))
+    cf = named("gt_ed_cf")
+    cf_rgb = b.node('ShaderNodeSeparateXYZ')
+    b.link(cf, cf_rgb.inputs[0])
+    broken_f = math_op('GREATER_THAN', cf_rgb.outputs[0], 0.6)
+    facet_tilt = scaled(b.vec('SUBTRACT', cf, (0.5, 0.5, 0.5)), math_op('MULTIPLY', broken_f, 1.6))
+    # sharp = 1 still keeps a little grain on the intact parts
+    soft_amount = math_op('SUBTRACT', 1.0, math_op('MULTIPLY', sharp, 0.8))
+    tilt = b.vec('ADD', scaled(soft_tilt, soft_amount), scaled(facet_tilt, sharp))
+    rough = scaled(tilt, math_op('MULTIPLY', out["Wear"], 1.2))
+    flat = b.node('GeometryNodeFieldOnDomain', domain='FACE', data_type='FLOAT_VECTOR')
+    b.link(nrm_smooth, _sock(flat.inputs, "Value", 'VECTOR'))
+    facet_on = math_op('MULTIPLY', math_op('MULTIPLY', broken_f, sharp), math_op('MINIMUM', math_op('MULTIPLY', out["Wear"], 1e4), 1.0))
+    base = b.lerp(nrm_smooth, _sock(flat.outputs, "Value", 'VECTOR'), facet_on)
+    nrm = normalize(b.vec('ADD', base, rough))
     # Lift (float above the surface) along normals the neighbouring strips share, so
     # they meet exactly instead of leaving hairline cracks where the edge shows through:
     # at the edge along the edge normal, far enough to clear both faces by Offset; at
@@ -459,7 +475,8 @@ def _build_node_group():
     slide = math_op('MULTIPLY', slide, math_op('SUBTRACT', 1.0, chip))
     along = scaled(named("gt_ed_dir"), math_op('ADD', slide, shift_along))
     setpos = b.node('GeometryNodeSetPosition')
-    b.link(join.outputs[0], _sock(setpos.inputs, "Geometry"))
+    faced = store(join.outputs[0], "gt_ed_cf", _sock(cells.outputs, "Color"), 'FACE')
+    b.link(faced, _sock(setpos.inputs, "Geometry"))
     b.link(b.vec('ADD', b.vec('ADD', lift_v, along), bite), _sock(setpos.inputs, "Offset"))
     b.column(300)
     # Strips must face the same way as the face under them (their winding depends on
@@ -477,7 +494,7 @@ def _build_node_group():
     shade = b.node('GeometryNodeSetShadeSmooth')
     b.link(_sock(flip.outputs, "Mesh"), _sock(shade.inputs, "Mesh"))
     _sock(shade.inputs, "Shade Smooth").default_value = True
-    setn = b.node('GeometryNodeSetMeshNormal', mode='FREE', domain='POINT')
+    setn = b.node('GeometryNodeSetMeshNormal', mode='FREE', domain='CORNER')
     b.link(_sock(shade.outputs, "Mesh"), _sock(setn.inputs, "Mesh"))
     b.link(nrm, _sock(setn.inputs, "Custom Normal"))
     clean = b.node('GeometryNodeRemoveAttribute')
@@ -501,7 +518,7 @@ def _build_node_group():
 # Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
 # get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
 # otherwise they would keep the old tree forever (it is reused by name).
-GROUP_VERSION = 10
+GROUP_VERSION = 11
 # Inputs whose saved value is dropped when upgrading from older versions (they had
 # no effect there, so the new default applies): {input name: first version it worked}.
 _RESET_BEFORE = {"Concave Edges": 4}
