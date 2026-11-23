@@ -352,6 +352,24 @@ def _build_node_group():
     join = b.node('GeometryNodeJoinGeometry')
     for h in reversed(halves):
         b.link(h, join.inputs[0])
+    # Worn: jitter the grid (along the edge everywhere but the ends, across on the
+    # inner rows), so once it is triangulated the chips break along irregular
+    # triangles instead of a regular quad grid.
+    def jitter(seed, amount):
+        rnd = b.node('FunctionNodeRandomValue', data_type='FLOAT')
+        _sock(rnd.inputs, "Min", 'VALUE').default_value = -1.0
+        _sock(rnd.inputs, "Max", 'VALUE').default_value = 1.0
+        _sock(rnd.inputs, "Seed").default_value = seed
+        return math_op('MULTIPLY', _sock(rnd.outputs, "Value", 'VALUE'), amount)
+    gx, gt = named("gt_ed_x", 'FLOAT'), named("gt_ed_t", 'FLOAT')
+    worn_f = math_op('MINIMUM', math_op('MULTIPLY', out["Wear"], 1e4), 1.0)
+    col_step = math_op('DIVIDE', 0.4, math_op('MAXIMUM', math_op('SUBTRACT', out["Wear Detail"], 1.0), 1.0))
+    inner_x = math_op('LESS_THAN', math_op('ABSOLUTE', gx), 0.499)
+    inner_t = math_op('MULTIPLY', math_op('GREATER_THAN', gt, 0.001), math_op('LESS_THAN', gt, 0.999))
+    jx = math_op('MULTIPLY', jitter(11, col_step), math_op('MULTIPLY', inner_x, worn_f))
+    jt = math_op('MULTIPLY', jitter(23, 0.1), math_op('MULTIPLY', inner_t, worn_f))
+    joined = store(join.outputs[0], "gt_ed_x", math_op('ADD', gx, jx), 'POINT', 'FLOAT')
+    joined = store(joined, "gt_ed_t", math_op('ADD', gt, jt), 'POINT', 'FLOAT')
     t_in = named("gt_ed_t", 'FLOAT')        # 0 at the edge, 1 at the inner side
     length_p = named("gt_ed_len", 'FLOAT')
     u = math_op('ADD', named("gt_ed_x", 'FLOAT'), 0.5)  # 0..1 along the edge (vertex 1 -> 2)
@@ -418,7 +436,10 @@ def _build_node_group():
     cell_r, cell_g = cell_rgb.outputs[0], cell_rgb.outputs[1]
     broken = math_op('GREATER_THAN', cell_r, 0.6)                      # this piece is chipped
     depth = math_op('ADD', 0.3, math_op('MULTIPLY', cell_g, 0.6))      # how deep
-    sharp_chip = math_op('MULTIPLY', broken, depth)
+    # each point of a chip bites a bit more or less: a jagged, broken outline
+    # instead of a straight cut
+    sharp_chip = math_op('MINIMUM', math_op('MULTIPLY', math_op('MULTIPLY', broken, depth),
+                                            math_op('ADD', 1.0, jitter(37, 0.3))), 0.95)
     chip = math_op('MULTIPLY', math_op('ADD', soft_chip, math_op('MULTIPLY', math_op('SUBTRACT', sharp_chip, soft_chip), sharp)),
                    out["Wear"])
     strip_width = math_op('MULTIPLY', out["Width"], named("gt_ed_ff", 'FLOAT'))
@@ -475,8 +496,13 @@ def _build_node_group():
     slide = math_op('MULTIPLY', slide, math_op('SUBTRACT', 1.0, chip))
     along = scaled(named("gt_ed_dir"), math_op('ADD', slide, shift_along))
     setpos = b.node('GeometryNodeSetPosition')
-    faced = store(join.outputs[0], "gt_ed_cf", _sock(cells.outputs, "Color"), 'FACE')
-    b.link(faced, _sock(setpos.inputs, "Geometry"))
+    b.link(joined, _sock(setpos.inputs, "Geometry"))
+    # worn: triangles (the jittered quads split along varying diagonals); then each
+    # face takes the cell under its centre
+    tri = b.node('GeometryNodeTriangulate')
+    b.link(_sock(setpos.outputs, "Geometry"), _sock(tri.inputs, "Mesh"))
+    b.link(is_worn, _sock(tri.inputs, "Selection"))
+    faced = store(_sock(tri.outputs, "Mesh"), "gt_ed_cf", _sock(cells.outputs, "Color"), 'FACE')
     b.link(b.vec('ADD', b.vec('ADD', lift_v, along), bite), _sock(setpos.inputs, "Offset"))
     b.column(300)
     # Strips must face the same way as the face under them (their winding depends on
@@ -489,7 +515,7 @@ def _build_node_group():
     b.link(_sock(facing.outputs, "Value"), backwards.inputs[0])
     backwards.inputs[1].default_value = 0.0
     flip = b.node('GeometryNodeFlipFaces')
-    b.link(_sock(setpos.outputs, "Geometry"), _sock(flip.inputs, "Mesh"))
+    b.link(faced, _sock(flip.inputs, "Mesh"))
     b.link(backwards.outputs[0], _sock(flip.inputs, "Selection"))
     shade = b.node('GeometryNodeSetShadeSmooth')
     b.link(_sock(flip.outputs, "Mesh"), _sock(shade.inputs, "Mesh"))
@@ -518,7 +544,7 @@ def _build_node_group():
 # Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
 # get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
 # otherwise they would keep the old tree forever (it is reused by name).
-GROUP_VERSION = 11
+GROUP_VERSION = 12
 # Inputs whose saved value is dropped when upgrading from older versions (they had
 # no effect there, so the new default applies): {input name: first version it worked}.
 _RESET_BEFORE = {"Concave Edges": 4}
