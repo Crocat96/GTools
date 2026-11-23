@@ -469,10 +469,10 @@ def _build_node_group():
     bite = scaled(named("gt_ed_df"), math_op('MULTIPLY', math_op('MULTIPLY', strip_width, chip), math_op('MULTIPLY', t_in, -1.0)))
     # Normals. Soft wear: per-point noise that fades out towards the face (blurry).
     # Sharp wear: each face of the strip takes the cell under its centre (stored per
-    # face, gt_ed_cf). A chipped cell is a flat chamfer: its faces all get the edge's
-    # bisector normal (45 deg on a right-angle edge), constant over the face (set per
-    # corner) with only a slight tilt of its own, so the break reads as a flat facet
-    # with a hard break to the rounded, intact bevel around it.
+    # face, gt_ed_cf). A chipped cell is a 45-degree chamfer: its faces lean to the
+    # edge's bisector normal, with a slight tilt of their own. Normals are set per
+    # point, so the triangles shade smooth into each other (only the strip's border
+    # is sharp).
     soft_tilt = scaled(b.vec('SUBTRACT', _sock(noise.outputs, "Color"), (0.5, 0.5, 0.5)),
                        math_op('SUBTRACT', 1.0, t_in))
     cf = named("gt_ed_cf")
@@ -490,17 +490,8 @@ def _build_node_group():
                           math_op('SUBTRACT', 1.0, facet_on))
     tilt = b.vec('ADD', scaled(soft_tilt, soft_amount), facet_tilt)
     rough = scaled(tilt, math_op('MULTIPLY', out["Wear"], 1.2))
-    flat = b.node('GeometryNodeFieldOnDomain', domain='FACE', data_type='FLOAT_VECTOR')
-    b.link(n_edge, _sock(flat.inputs, "Value", 'VECTOR'))
-    base = b.lerp(nrm_smooth, normalize(_sock(flat.outputs, "Value", 'VECTOR')), facet_on)
-    nrm_round = normalize(b.vec('ADD', base, rough))
-    # Decimated look: with Wear Sharpness every face of a worn strip is flat (its
-    # normal is constant over the face), so the rounded bevel turns into irregular
-    # low-poly triangles (the grid is jittered and triangulated), like a Decimate.
-    decim = b.node('GeometryNodeFieldOnDomain', domain='FACE', data_type='FLOAT_VECTOR')
-    b.link(nrm_round, _sock(decim.inputs, "Value", 'VECTOR'))
-    nrm = normalize(b.lerp(nrm_round, normalize(_sock(decim.outputs, "Value", 'VECTOR')),
-                           math_op('MULTIPLY', sharp, worn_on)))
+    base = b.lerp(nrm_smooth, n_edge, facet_on)
+    nrm = normalize(b.vec('ADD', base, rough))
     # Lift (float above the surface) along normals the neighbouring strips share, so
     # they meet exactly instead of leaving hairline cracks where the edge shows through:
     # at the edge along the edge normal, far enough to clear both faces by Offset; at
@@ -556,8 +547,13 @@ def _build_node_group():
     shade = b.node('GeometryNodeSetShadeSmooth')
     b.link(_sock(flip.outputs, "Mesh"), _sock(shade.inputs, "Mesh"))
     _sock(shade.inputs, "Shade Smooth").default_value = True
-    setn = b.node('GeometryNodeSetMeshNormal', mode='FREE', domain='CORNER')
-    b.link(_sock(shade.outputs, "Mesh"), _sock(setn.inputs, "Mesh"))
+    # edges: smooth inside the strip, sharp on its border
+    shade_e = b.node('GeometryNodeSetShadeSmooth', domain='EDGE')
+    b.link(_sock(shade.outputs, "Mesh"), _sock(shade_e.inputs, "Mesh"))
+    neighbors = b.node('GeometryNodeInputMeshEdgeNeighbors')
+    b.link(math_op('GREATER_THAN', _sock(neighbors.outputs, "Face Count"), 1.0), _sock(shade_e.inputs, "Shade Smooth"))
+    setn = b.node('GeometryNodeSetMeshNormal', mode='FREE', domain='POINT')
+    b.link(_sock(shade_e.outputs, "Mesh"), _sock(setn.inputs, "Mesh"))
     b.link(nrm, _sock(setn.inputs, "Custom Normal"))
     clean = b.node('GeometryNodeRemoveAttribute')
     b.link(_sock(setn.outputs, "Mesh"), _sock(clean.inputs, "Geometry"))
@@ -580,7 +576,7 @@ def _build_node_group():
 # Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
 # get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
 # otherwise they would keep the old tree forever (it is reused by name).
-GROUP_VERSION = 16
+GROUP_VERSION = 17
 # Inputs whose saved value is dropped when upgrading from older versions (they had
 # no effect there, so the new default applies): {input name: first version it worked}.
 _RESET_BEFORE = {"Concave Edges": 4}
