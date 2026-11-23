@@ -60,6 +60,21 @@ def _build_node_group():
     # the strips copy this UV map from the faces under them (set to the active one)
     s = iface.new_socket("UV Map", in_out='INPUT', socket_type='NodeSocketString')
     s.default_value = "UVMap"
+    # finer control of the worn look
+    for name, default, tip in (
+            ("Chip Amount", 0.4, "How much of the edge is chipped"),
+            ("Chip Depth", 1.0, "How deep the chips bite into the strip"),
+            ("Chamfer", 1.0, "How flat the chips are: 1 = a flat 45-degree chamfer, 0 = they follow the rounding"),
+            ("Facet Tilt", 0.5, "How much each chip / triangle leans its own way"),
+            ("Jaggedness", 0.3, "How ragged the chips' outline is"),
+            ("Irregularity", 1.0, "How uneven the triangles are")):
+        s = iface.new_socket(name, in_out='INPUT', socket_type='NodeSocketFloat')
+        s.default_value, s.min_value, s.max_value, s.subtype = default, 0.0, 1.0, 'FACTOR'
+        s.description = tip
+    # a material of its own for the strips (otherwise: the one of the face below)
+    s = iface.new_socket("Use Decal Material", in_out='INPUT', socket_type='NodeSocketBool')
+    s.default_value = False
+    iface.new_socket("Decal Material", in_out='INPUT', socket_type='NodeSocketMaterial')
 
     b = _Builder(ng)
     b.column(-2400)
@@ -394,11 +409,11 @@ def _build_node_group():
         return math_op('MULTIPLY', _sock(rnd.outputs, "Value", 'VALUE'), amount)
     gx, gt = named("gt_ed_x", 'FLOAT'), named("gt_ed_t", 'FLOAT')
     worn_f = math_op('MINIMUM', math_op('MULTIPLY', out["Wear"], 1e4), 1.0)
-    col_step = math_op('DIVIDE', 0.45, math_op('MAXIMUM', math_op('SUBTRACT', named("gt_ed_cols", 'FLOAT'), 1.0), 1.0))
+    col_step = math_op('DIVIDE', math_op('MULTIPLY', out["Irregularity"], 0.45), math_op('MAXIMUM', math_op('SUBTRACT', named("gt_ed_cols", 'FLOAT'), 1.0), 1.0))
     inner_x = math_op('LESS_THAN', math_op('ABSOLUTE', gx), 0.499)
     inner_t = math_op('MULTIPLY', math_op('GREATER_THAN', gt, 0.001), math_op('LESS_THAN', gt, 0.999))
     jx = math_op('MULTIPLY', jitter(11, col_step), math_op('MULTIPLY', inner_x, worn_f))
-    jt = math_op('MULTIPLY', jitter(23, 0.3), math_op('MULTIPLY', inner_t, worn_f))
+    jt = math_op('MULTIPLY', jitter(23, math_op('MULTIPLY', out["Irregularity"], 0.3)), math_op('MULTIPLY', inner_t, worn_f))
     joined = store(join.outputs[0], "gt_ed_x", math_op('ADD', gx, jx), 'POINT', 'FLOAT')
     joined = store(joined, "gt_ed_t", math_op('ADD', gt, jt), 'POINT', 'FLOAT')
     t_in = named("gt_ed_t", 'FLOAT')        # 0 at the edge, 1 at the inner side
@@ -465,12 +480,13 @@ def _build_node_group():
     cell_rgb = b.node('ShaderNodeSeparateXYZ')
     b.link(_sock(cells.outputs, "Color"), cell_rgb.inputs[0])
     cell_r, cell_g = cell_rgb.outputs[0], cell_rgb.outputs[1]
-    broken = math_op('GREATER_THAN', cell_r, 0.6)                      # this piece is chipped
-    depth = math_op('ADD', 0.3, math_op('MULTIPLY', cell_g, 0.6))      # how deep
+    chip_cut = math_op('SUBTRACT', 1.0, out["Chip Amount"])
+    broken = math_op('GREATER_THAN', cell_r, chip_cut)                 # this piece is chipped
+    depth = math_op('MULTIPLY', math_op('ADD', 0.3, math_op('MULTIPLY', cell_g, 0.6)), out["Chip Depth"])  # how deep
     # each point of a chip bites a bit more or less: a jagged, broken outline
     # instead of a straight cut
     sharp_chip = math_op('MINIMUM', math_op('MULTIPLY', math_op('MULTIPLY', broken, depth),
-                                            math_op('ADD', 1.0, jitter(37, 0.3))), 0.95)
+                                            math_op('ADD', 1.0, jitter(37, out["Jaggedness"]))), 0.95)
     chip = math_op('MULTIPLY', math_op('ADD', soft_chip, math_op('MULTIPLY', math_op('SUBTRACT', sharp_chip, soft_chip), sharp)),
                    out["Wear"])
     strip_width = math_op('MULTIPLY', out["Width"], named("gt_ed_ff", 'FLOAT'))
@@ -486,19 +502,20 @@ def _build_node_group():
     cf = named("gt_ed_cf")
     cf_rgb = b.node('ShaderNodeSeparateXYZ')
     b.link(cf, cf_rgb.inputs[0])
-    broken_f = math_op('GREATER_THAN', cf_rgb.outputs[0], 0.6)
+    broken_f = math_op('GREATER_THAN', cf_rgb.outputs[0], chip_cut)
     facet_on = math_op('MULTIPLY', math_op('MULTIPLY', broken_f, sharp), math_op('MINIMUM', math_op('MULTIPLY', out["Wear"], 1e4), 1.0))
     # every face gets a slight tilt of its own (decimated look), chamfers a bit more
     worn_on = math_op('MINIMUM', math_op('MULTIPLY', out["Wear"], 1e4), 1.0)
     facet_tilt = scaled(b.vec('SUBTRACT', cf, (0.5, 0.5, 0.5)),
-                        math_op('ADD', math_op('MULTIPLY', facet_on, 0.25),
-                                math_op('MULTIPLY', math_op('MULTIPLY', sharp, worn_on), 0.15)))
+                        math_op('MULTIPLY', out["Facet Tilt"],
+                                math_op('ADD', math_op('MULTIPLY', facet_on, 0.5),
+                                        math_op('MULTIPLY', math_op('MULTIPLY', sharp, worn_on), 0.3))))
     # sharp = 1 keeps a little grain on the intact parts, none on the chamfers
     soft_amount = math_op('MULTIPLY', math_op('SUBTRACT', 1.0, math_op('MULTIPLY', sharp, 0.8)),
                           math_op('SUBTRACT', 1.0, facet_on))
     tilt = b.vec('ADD', scaled(soft_tilt, soft_amount), facet_tilt)
     rough = scaled(tilt, math_op('MULTIPLY', out["Wear"], 1.2))
-    base = b.lerp(nrm_smooth, n_edge, facet_on)
+    base = b.lerp(nrm_smooth, n_edge, math_op('MULTIPLY', facet_on, out["Chamfer"]))
     nrm = normalize(b.vec('ADD', base, rough))
     # Lift (float above the surface) along normals the neighbouring strips share, so
     # they meet exactly instead of leaving hairline cracks where the edge shows through:
@@ -601,15 +618,33 @@ def _build_node_group():
     final = b.node('GeometryNodeJoinGeometry')
     b.link(masked, final.inputs[0])
     b.link(geo_sharp, final.inputs[0])
-    # strips use the material of the face under them (the join gives them the base
-    # mesh's material list; their own faces would otherwise get an empty slot)
+    # Strips use the material of the face under them. The join gives the strips an
+    # empty slot at the end of the base mesh's list (they have no materials of their
+    # own), and its index N is the number of real materials: every index is kept
+    # below N, as Blender does for out-of-range ones (a cutter without material
+    # leaves its faces past the end: they show the last material, and so must their
+    # strips, instead of the empty slot).
     mat_read = b.node('GeometryNodeInputNamedAttribute', data_type='INT')
     _sock(mat_read.inputs, "Name").default_value = "gt_ed_mat"
+    is_strip = math_op('GREATER_THAN', _sock(mat_read.outputs, "Attribute"), 0.5)
+    cur_idx = b.node('GeometryNodeInputMaterialIndex')
+    stat = b.node('GeometryNodeAttributeStatistic', domain='FACE', data_type='FLOAT')
+    b.link(final.outputs[0], _sock(stat.inputs, "Geometry"))
+    b.link(is_strip, _sock(stat.inputs, "Selection"))
+    b.link(cur_idx.outputs[0], _sock(stat.inputs, "Attribute", 'VALUE'))
+    n_mats = b.switch('FLOAT', math_op('GREATER_THAN', _sock(stat.outputs, "Max", 'VALUE'), 0.5),
+                      1e6, _sock(stat.outputs, "Max", 'VALUE'))      # no strips / no materials: leave alone
+    wanted = b.switch('FLOAT', is_strip, cur_idx.outputs[0], math_op('SUBTRACT', _sock(mat_read.outputs, "Attribute"), 1.0))
     set_mat = b.node('GeometryNodeSetMaterialIndex')
     b.link(final.outputs[0], _sock(set_mat.inputs, "Geometry"))
-    b.link(math_op('GREATER_THAN', _sock(mat_read.outputs, "Attribute"), 0.5), _sock(set_mat.inputs, "Selection"))
-    b.link(math_op('SUBTRACT', _sock(mat_read.outputs, "Attribute"), 1.0), _sock(set_mat.inputs, "Material Index"))
-    b.link(_sock(set_mat.outputs, "Geometry"), _sock(clean.inputs, "Geometry"))
+    b.link(math_op('MAXIMUM', math_op('MINIMUM', wanted, math_op('SUBTRACT', n_mats, 1.0)), 0.0),
+           _sock(set_mat.inputs, "Material Index"))
+    # or a material of their own
+    own = b.node('GeometryNodeSetMaterial')
+    b.link(_sock(set_mat.outputs, "Geometry"), _sock(own.inputs, "Geometry"))
+    b.link(math_op('MULTIPLY', is_strip, out["Use Decal Material"]), _sock(own.inputs, "Selection"))
+    b.link(out["Decal Material"], _sock(own.inputs, "Material"))
+    b.link(_sock(own.outputs, "Geometry"), _sock(clean.inputs, "Geometry"))
     gout = b.node('NodeGroupOutput')
     b.link(_sock(clean.outputs, "Geometry"), gout.inputs[0])
     ng[VERSION_KEY] = GROUP_VERSION
@@ -619,7 +654,7 @@ def _build_node_group():
 # Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
 # get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
 # otherwise they would keep the old tree forever (it is reused by name).
-GROUP_VERSION = 19
+GROUP_VERSION = 20
 # Inputs whose saved value is dropped when upgrading from older versions (they had
 # no effect there, so the new default applies): {input name: first version it worked}.
 _RESET_BEFORE = {"Concave Edges": 4}

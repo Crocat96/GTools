@@ -114,8 +114,9 @@ GUIDE = (
          "(off by default: on inside corners the fake rounding reads as a raised bead) and Offset. "
          "Wear (0 = smooth) gives a concrete-like worn edge: the bevel gets chipped and rough; Wear Scale "
          "sets the size of the chips, Wear Sharpness how angular they are (0 soft; 1 decimated: the strip becomes a few big, irregular triangles that shade smooth into each other, with a sharp, jagged border; broken pieces lean to a 45-degree chamfer) and Wear Detail the triangle density (64 = about one triangle pair per Width along the edge, the same on short and long edges). Corners where three "
-         "hard edges meet round off like a real rounded box. The strips copy the UVs and the material of the face "
-         "under them (UV Map = the active one, editable), so textures line up across them, and they carry a "
+         "hard edges meet round off like a real rounded box. Finer wear controls: Chip Amount, Chip Depth, Chamfer (how flat the chips are, 1 = 45 degrees), Facet Tilt, "
+         "Jaggedness (ragged outline) and Irregularity (uneven triangles). The strips copy the UVs and the material of the face "
+         "under them, or use their own with Use Decal Material + Decal Material (UV Map = the active one, editable), so textures line up across them, and they carry a "
          "colour attribute EdgeDecal_Mask: white at the edge, black at the strip's inner border and on the rest of "
          "the mesh. Use it in a material through a Color Attribute or Attribute node."),
     )),
