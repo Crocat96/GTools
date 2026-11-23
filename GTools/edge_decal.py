@@ -52,7 +52,10 @@ def _build_node_group():
     s = iface.new_socket("Wear Scale", in_out='INPUT', socket_type='NodeSocketFloat')
     s.default_value, s.min_value = 6.0, 0.01
     s = iface.new_socket("Wear Detail", in_out='INPUT', socket_type='NodeSocketInt')
-    s.default_value, s.min_value, s.max_value = 32, 4, 512
+    s.default_value, s.min_value, s.max_value = 64, 4, 512
+    # 0 = soft, blobby wear; 1 = sharp, angular chips (concrete)
+    s = iface.new_socket("Wear Sharpness", in_out='INPUT', socket_type='NodeSocketFloat')
+    s.default_value, s.min_value, s.max_value, s.subtype = 0.8, 0.0, 1.0, 'FACTOR'
 
     b = _Builder(ng)
     b.column(-2400)
@@ -394,12 +397,36 @@ def _build_node_group():
     _sock(noise.inputs, "Detail").default_value = 6.0
     _sock(noise.inputs, "Roughness").default_value = 0.65
     fac = _sock(noise.outputs, "Factor")
-    chip = math_op('MULTIPLY', math_op('MINIMUM', math_op('MAXIMUM', math_op('MULTIPLY', math_op('SUBTRACT', fac, 0.42), 3.0), 0.0), 0.9),
+    sharp = out["Wear Sharpness"]
+    soft_chip = math_op('MINIMUM', math_op('MAXIMUM', math_op('MULTIPLY', math_op('SUBTRACT', fac, 0.42), 3.0), 0.0), 0.9)
+    # Sharp chips: cells (Voronoi) are the broken-off pieces, each with its own depth
+    # (or none) and its own tilt, so the chips have crisp edges and flat facets. The
+    # soft noise wobbles the cells a little so their outlines aren't too regular.
+    cells = b.node('ShaderNodeTexVoronoi')
+    if hasattr(cells, "voronoi_dimensions"):
+        cells.voronoi_dimensions = '3D'
+    cells.feature = 'F1'
+    wobble = scaled(b.vec('SUBTRACT', _sock(noise.outputs, "Color"), (0.5, 0.5, 0.5)),
+                    math_op('DIVIDE', 0.6, math_op('MAXIMUM', out["Wear Scale"], 0.01)))
+    b.link(b.vec('ADD', nposition.outputs[0], wobble), _sock(cells.inputs, "Vector"))
+    b.link(out["Wear Scale"], _sock(cells.inputs, "Scale"))
+    _sock(cells.inputs, "Randomness").default_value = 1.0
+    cell_rgb = b.node('ShaderNodeSeparateXYZ')
+    b.link(_sock(cells.outputs, "Color"), cell_rgb.inputs[0])
+    cell_r, cell_g = cell_rgb.outputs[0], cell_rgb.outputs[1]
+    broken = math_op('GREATER_THAN', cell_r, 0.6)                      # this piece is chipped
+    depth = math_op('ADD', 0.3, math_op('MULTIPLY', cell_g, 0.6))      # how deep
+    sharp_chip = math_op('MULTIPLY', broken, depth)
+    chip = math_op('MULTIPLY', math_op('ADD', soft_chip, math_op('MULTIPLY', math_op('SUBTRACT', sharp_chip, soft_chip), sharp)),
                    out["Wear"])
     strip_width = math_op('MULTIPLY', out["Width"], named("gt_ed_ff", 'FLOAT'))
     bite = scaled(named("gt_ed_df"), math_op('MULTIPLY', math_op('MULTIPLY', strip_width, chip), math_op('MULTIPLY', t_in, -1.0)))
-    rough = scaled(b.vec('SUBTRACT', _sock(noise.outputs, "Color"), (0.5, 0.5, 0.5)),
-                   math_op('MULTIPLY', math_op('MULTIPLY', out["Wear"], 1.2), math_op('SUBTRACT', 1.0, t_in)))
+    soft_tilt = b.vec('SUBTRACT', _sock(noise.outputs, "Color"), (0.5, 0.5, 0.5))
+    facet_tilt = b.vec('SUBTRACT', _sock(cells.outputs, "Color"), (0.5, 0.5, 0.5))
+    tilt = b.lerp(soft_tilt, facet_tilt, sharp)
+    # soft: fades out towards the face; sharp: a chip's facet keeps its tilt further in
+    fade = math_op('SUBTRACT', 1.0, math_op('MULTIPLY', t_in, math_op('SUBTRACT', 1.0, math_op('MULTIPLY', sharp, 0.5))))
+    rough = scaled(tilt, math_op('MULTIPLY', math_op('MULTIPLY', out["Wear"], 1.2), fade))
     nrm = normalize(b.vec('ADD', nrm_smooth, rough))
     # Lift (float above the surface) along normals the neighbouring strips share, so
     # they meet exactly instead of leaving hairline cracks where the edge shows through:
@@ -474,7 +501,7 @@ def _build_node_group():
 # Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
 # get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
 # otherwise they would keep the old tree forever (it is reused by name).
-GROUP_VERSION = 9
+GROUP_VERSION = 10
 # Inputs whose saved value is dropped when upgrading from older versions (they had
 # no effect there, so the new default applies): {input name: first version it worked}.
 _RESET_BEFORE = {"Concave Edges": 4}
