@@ -175,7 +175,7 @@ def _build_node_group():
             b._set(n.inputs[1], c)
         return n.outputs[0]
 
-    def end_shift(V, V_other, other_edge):
+    def end_shift(V, V_other, other_edge, face_normal, at_a):
         evs = b.node('GeometryNodeInputMeshEdgeVertices')
         q1 = sample('EDGE', 'FLOAT_VECTOR', _sock(evs.outputs, "Position 1"), other_edge)
         q2 = sample('EDGE', 'FLOAT_VECTOR', _sock(evs.outputs, "Position 2"), other_edge)
@@ -199,12 +199,25 @@ def _build_node_group():
         other_hard = sample('EDGE', 'BOOLEAN', hard, other_edge)
         mitre = math_op('DIVIDE', math_op('MULTIPLY', out["Width"], math_op('ADD', 1.0, cos)), sin)
         along = math_op('DIVIDE', math_op('MULTIPLY', out["Width"], cos), sin)
+        # A reflex corner of the face (an inside corner of a concave n-gon, > 180
+        # degrees): the inner side has to be extended, not cut back. The face's winding
+        # says which: at its first corner a convex turn has (t x u) along the normal,
+        # at the second corner against it.
+        turn = b.node('ShaderNodeVectorMath', operation='CROSS_PRODUCT')
+        b.link(t, turn.inputs[0])
+        b.link(u, turn.inputs[1])
+        side = b.node('ShaderNodeVectorMath', operation='DOT_PRODUCT')
+        b.link(_sock(turn.outputs, "Vector"), side.inputs[0])
+        b.link(face_normal, side.inputs[1])
+        signed = math_op('MULTIPLY', _sock(side.outputs, "Value"), 1.0 if at_a else -1.0)
+        convex_sign = b.switch('FLOAT', math_op('GREATER_THAN', signed, -1e-6), -1.0, 1.0)
+        mitre = math_op('MULTIPLY', mitre, convex_sign)
+        along = math_op('MULTIPLY', along, convex_sign)
         shift = b.switch('FLOAT', other_hard, along, mitre)
-        shift = math_op('MINIMUM', shift, math_op('MULTIPLY', length, 0.5))
         return math_op('MAXIMUM', shift, math_op('MULTIPLY', out["Width"], -2.0)), other_hard
 
     b.column(-1050)
-    shifts, smooth_normals, mitred = [], [], []
+    shifts, smooth_normals, mitred, inwards = [], [], [], []
     for k in (0, 1):
         c_a = corners[k]
         nxt = b.node('GeometryNodeOffsetCornerInFace')
@@ -218,12 +231,20 @@ def _build_node_group():
             p = b.node('GeometryNodeInputPosition')
             verts.append(sample('POINT', 'FLOAT_VECTOR', p.outputs[0], _sock(voc.outputs, "Vertex Index")))
         V_a, V_b = verts
+        # Which side of the edge the face is on: the face runs V_a -> V_b along this
+        # edge, so it lies to the left (normal x edge direction). Exact for any polygon;
+        # the face's centre is not (in a concave n-gon, like the C-shaped faces booleans
+        # leave, it can sit across the edge and the strip would hang over the hole).
+        inward = b.node('ShaderNodeVectorMath', operation='CROSS_PRODUCT')
+        b.link(sides[k][0], inward.inputs[0])
+        b.link(b.vec('SUBTRACT', V_b, V_a), inward.inputs[1])
+        inwards.append(normalize(_sock(inward.outputs, "Vector")))
         eoc_a = b.node('GeometryNodeEdgesOfCorner')
         b.link(c_a, _sock(eoc_a.inputs, "Corner Index"))
         eoc_b = b.node('GeometryNodeEdgesOfCorner')
         b.link(c_b, _sock(eoc_b.inputs, "Corner Index"))
-        shift_a, hard_a = end_shift(V_a, V_b, _sock(eoc_a.outputs, "Previous Edge Index"))
-        shift_b, hard_b = end_shift(V_b, V_a, _sock(eoc_b.outputs, "Next Edge Index"))
+        shift_a, hard_a = end_shift(V_a, V_b, _sock(eoc_a.outputs, "Previous Edge Index"), sides[k][0], True)
+        shift_b, hard_b = end_shift(V_b, V_a, _sock(eoc_b.outputs, "Next Edge Index"), sides[k][0], False)
         # which end of the edge (vertex 1 / vertex 2) corner a sits on
         dot = b.node('ShaderNodeVectorMath', operation='DOT_PRODUCT')
         b.link(b.vec('SUBTRACT', V_a, mid), dot.inputs[0])
@@ -243,13 +264,18 @@ def _build_node_group():
     # Edge data onto the mesh (a copy for the decals), then one point per hard edge
     b.column(-900)
     g = geo
-    for name, value in (("gt_ed_dir", direction), ("gt_ed_n0", sides[0][0]), ("gt_ed_d0", sides[0][1]),
-                        ("gt_ed_n1", sides[1][0]), ("gt_ed_d1", sides[1][1]), ("gt_ed_ne", edge_normal)):
+    for name, value in (("gt_ed_dir", direction), ("gt_ed_n0", sides[0][0]), ("gt_ed_d0", inwards[0]),
+                        ("gt_ed_n1", sides[1][0]), ("gt_ed_d1", inwards[1]), ("gt_ed_ne", edge_normal)):
         g = store(g, name, value, 'EDGE')
     g = store(g, "gt_ed_len", length, 'EDGE', 'FLOAT')
     for k in (0, 1):
-        g = store(g, f"gt_ed_s1{k}", shifts[k][0], 'EDGE', 'FLOAT')
-        g = store(g, f"gt_ed_s2{k}", shifts[k][1], 'EDGE', 'FLOAT')
+        # Clamp overlap: if the cuts at both ends don't fit in the edge (a short edge,
+        # a wide strip), the strip is narrowed so they just do, instead of folding over.
+        cut = math_op('ADD', math_op('MAXIMUM', shifts[k][0], 0.0), math_op('MAXIMUM', shifts[k][1], 0.0))
+        fit = math_op('MINIMUM', math_op('DIVIDE', length, math_op('MAXIMUM', cut, 1e-9)), 1.0)
+        g = store(g, f"gt_ed_f{k}", fit, 'EDGE', 'FLOAT')
+        g = store(g, f"gt_ed_s1{k}", math_op('MULTIPLY', shifts[k][0], fit), 'EDGE', 'FLOAT')
+        g = store(g, f"gt_ed_s2{k}", math_op('MULTIPLY', shifts[k][1], fit), 'EDGE', 'FLOAT')
         g = store(g, f"gt_ed_m{k}1", smooth_normals[k][0], 'EDGE')
         g = store(g, f"gt_ed_m{k}2", smooth_normals[k][1], 'EDGE')
     # At the edge itself both strips share this normal: the average of their two faces'
@@ -297,6 +323,7 @@ def _build_node_group():
         pts = store(points, "gt_ed_nf", named(f"gt_ed_n{k}"), 'POINT')
         pts = store(pts, "gt_ed_sa", named(f"gt_ed_s1{k}", 'FLOAT'), 'POINT', 'FLOAT')
         pts = store(pts, "gt_ed_sb", named(f"gt_ed_s2{k}", 'FLOAT'), 'POINT', 'FLOAT')
+        pts = store(pts, "gt_ed_ff", named(f"gt_ed_f{k}", 'FLOAT'), 'POINT', 'FLOAT')
         pts = store(pts, "gt_ed_mf1", named(f"gt_ed_m{k}1"), 'POINT')
         pts = store(pts, "gt_ed_mf2", named(f"gt_ed_m{k}2"), 'POINT')
         pts = store(pts, "gt_ed_df", named(f"gt_ed_d{k}"), 'POINT')
@@ -305,7 +332,7 @@ def _build_node_group():
         b.link(named(f"gt_ed_d{k}"), _sock(rot.inputs, "Secondary Axis"))
         scale = b.node('ShaderNodeCombineXYZ')
         b.link(named("gt_ed_len", 'FLOAT'), scale.inputs[0])
-        b.link(out["Width"], scale.inputs[1])
+        b.link(math_op('MULTIPLY', out["Width"], named(f"gt_ed_f{k}", 'FLOAT')), scale.inputs[1])
         scale.inputs[2].default_value = 1.0
         inst = b.node('GeometryNodeInstanceOnPoints')
         b.link(pts, _sock(inst.inputs, "Points"))
@@ -369,7 +396,8 @@ def _build_node_group():
     fac = _sock(noise.outputs, "Factor")
     chip = math_op('MULTIPLY', math_op('MINIMUM', math_op('MAXIMUM', math_op('MULTIPLY', math_op('SUBTRACT', fac, 0.42), 3.0), 0.0), 0.9),
                    out["Wear"])
-    bite = scaled(named("gt_ed_df"), math_op('MULTIPLY', math_op('MULTIPLY', out["Width"], chip), math_op('MULTIPLY', t_in, -1.0)))
+    strip_width = math_op('MULTIPLY', out["Width"], named("gt_ed_ff", 'FLOAT'))
+    bite = scaled(named("gt_ed_df"), math_op('MULTIPLY', math_op('MULTIPLY', strip_width, chip), math_op('MULTIPLY', t_in, -1.0)))
     rough = scaled(b.vec('SUBTRACT', _sock(noise.outputs, "Color"), (0.5, 0.5, 0.5)),
                    math_op('MULTIPLY', math_op('MULTIPLY', out["Wear"], 1.2), math_op('SUBTRACT', 1.0, t_in)))
     nrm = normalize(b.vec('ADD', nrm_smooth, rough))
@@ -398,6 +426,10 @@ def _build_node_group():
     sa = named("gt_ed_sa", 'FLOAT')
     sb_back = math_op('MULTIPLY', named("gt_ed_sb", 'FLOAT'), -1.0)
     slide = math_op('MULTIPLY', math_op('ADD', sa, math_op('MULTIPLY', math_op('SUBTRACT', sb_back, sa), s_par)), t_in)
+    # a chip pulls the inner side straight back towards the edge point it starts
+    # from (the mitre slide shrinks with it), so near a corner it stays inside its own
+    # mitre instead of crossing into the next strip
+    slide = math_op('MULTIPLY', slide, math_op('SUBTRACT', 1.0, chip))
     along = scaled(named("gt_ed_dir"), math_op('ADD', slide, shift_along))
     setpos = b.node('GeometryNodeSetPosition')
     b.link(join.outputs[0], _sock(setpos.inputs, "Geometry"))
@@ -442,7 +474,7 @@ def _build_node_group():
 # Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
 # get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
 # otherwise they would keep the old tree forever (it is reused by name).
-GROUP_VERSION = 5
+GROUP_VERSION = 9
 # Inputs whose saved value is dropped when upgrading from older versions (they had
 # no effect there, so the new default applies): {input name: first version it worked}.
 _RESET_BEFORE = {"Concave Edges": 4}
