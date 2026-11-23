@@ -299,28 +299,47 @@ def _build_node_group():
     b.link(hard, _sock(m2p.inputs, "Selection"))
     points = _sock(m2p.outputs, "Points")
 
-    # A unit strip: X along the edge (-0.5..0.5), Y inwards (0..1); gt_ed_t = Y
+    # Unit strips: X along the edge (-0.5..0.5), Y inwards (0..1); gt_ed_t = Y,
+    # gt_ed_x = X, gt_ed_cols = number of columns. Smooth: 4 columns x 2 rows (two
+    # of the columns get placed one width in from each end, so a corner's rounding
+    # stays near the corner). Worn: 5 rows and 4, 8, ... 1024 columns, each edge
+    # picking the one whose columns are about as far apart as the rows (scaled by
+    # Wear Detail), so its triangles are even (a decimated look) on any edge length.
     b.column(-600)
-    grid = b.node('GeometryNodeMeshGrid')
-    for name, val in (("Size X", 1.0), ("Size Y", 1.0)):
-        _sock(grid.inputs, name).default_value = val
-    # Columns along the edge: smooth = 4 (two of them get placed one width in from
-    # each end, so a corner's rounding stays near the corner); worn = Wear Detail.
     worn = b.node('FunctionNodeCompare', data_type='FLOAT', operation='GREATER_THAN')
     b.link(out["Wear"], _sock(worn.inputs, "A", 'VALUE'))
     _sock(worn.inputs, "B", 'VALUE').default_value = 0.0
     is_worn = _sock(worn.outputs, "Result")
-    b.link(b.switch('INT', is_worn, 4, out["Wear Detail"]), _sock(grid.inputs, "Vertices X"))
-    # Rows across: 2 when smooth; worn, 5 so chips get facets across the strip too.
-    b.link(b.switch('INT', is_worn, 2, 5), _sock(grid.inputs, "Vertices Y"))
-    move = b.node('GeometryNodeTransform')
-    b.link(_sock(grid.outputs, "Mesh"), _sock(move.inputs, "Geometry"))
-    _sock(move.inputs, "Translation").default_value = (0.0, 0.5, 0.0)
-    pos = b.node('GeometryNodeInputPosition')
-    sep = b.node('ShaderNodeSeparateXYZ')
-    b.link(pos.outputs[0], sep.inputs[0])
-    strip = store(_sock(move.outputs, "Geometry"), "gt_ed_t", _sock(sep.outputs, "Y"), 'POINT', 'FLOAT')
-    strip = store(strip, "gt_ed_x", _sock(sep.outputs, "X"), 'POINT', 'FLOAT')
+
+    def template(cols, rows):
+        grid = b.node('GeometryNodeMeshGrid')
+        for name, val in (("Size X", 1.0), ("Size Y", 1.0), ("Vertices X", cols), ("Vertices Y", rows)):
+            _sock(grid.inputs, name).default_value = val
+        move = b.node('GeometryNodeTransform')
+        b.link(_sock(grid.outputs, "Mesh"), _sock(move.inputs, "Geometry"))
+        _sock(move.inputs, "Translation").default_value = (0.0, 0.5, 0.0)
+        pos = b.node('GeometryNodeInputPosition')
+        sep = b.node('ShaderNodeSeparateXYZ')
+        b.link(pos.outputs[0], sep.inputs[0])
+        st = store(_sock(move.outputs, "Geometry"), "gt_ed_t", _sock(sep.outputs, "Y"), 'POINT', 'FLOAT')
+        st = store(st, "gt_ed_x", _sock(sep.outputs, "X"), 'POINT', 'FLOAT')
+        val = b.node('ShaderNodeValue')
+        val.outputs[0].default_value = float(cols)
+        return store(st, "gt_ed_cols", val.outputs[0], 'POINT', 'FLOAT')
+
+    WORN_COLS = [4 << i for i in range(9)]          # 4 .. 1024
+    to_inst = b.node('GeometryNodeGeometryToInstance')
+    strips = [template(4, 2)] + [template(c, 5) for c in WORN_COLS]
+    # (the multi-input lists the newest link first: link them backwards)
+    for st in reversed(strips):
+        b.link(st, to_inst.inputs[0])
+    strip = _sock(to_inst.outputs, "Instances")
+    # columns wanted on this edge: length / (width / 4), x Wear Detail / 64
+    want = math_op('DIVIDE', math_op('MULTIPLY', named("gt_ed_len", 'FLOAT'), out["Wear Detail"]),
+                   math_op('MAXIMUM', math_op('MULTIPLY', out["Width"], 16.0), 1e-6))
+    level = math_op('SUBTRACT', math_op('CEIL', math_op('LOGARITHM', math_op('MAXIMUM', want, 4.0), 2.0)), 2.0)
+    level = math_op('MINIMUM', level, float(len(WORN_COLS) - 1))
+    pick = b.switch('INT', is_worn, 0, math_op('ADD', level, 1.0))
 
     b.column(-300)
     halves = []
@@ -342,6 +361,8 @@ def _build_node_group():
         inst = b.node('GeometryNodeInstanceOnPoints')
         b.link(pts, _sock(inst.inputs, "Points"))
         b.link(strip, _sock(inst.inputs, "Instance"))
+        _sock(inst.inputs, "Pick Instance").default_value = True
+        b.link(pick, _sock(inst.inputs, "Instance Index"))
         b.link(_sock(rot.outputs, "Rotation"), _sock(inst.inputs, "Rotation"))
         b.link(scale.outputs[0], _sock(inst.inputs, "Scale"))
         real = b.node('GeometryNodeRealizeInstances')
@@ -363,11 +384,11 @@ def _build_node_group():
         return math_op('MULTIPLY', _sock(rnd.outputs, "Value", 'VALUE'), amount)
     gx, gt = named("gt_ed_x", 'FLOAT'), named("gt_ed_t", 'FLOAT')
     worn_f = math_op('MINIMUM', math_op('MULTIPLY', out["Wear"], 1e4), 1.0)
-    col_step = math_op('DIVIDE', 0.4, math_op('MAXIMUM', math_op('SUBTRACT', out["Wear Detail"], 1.0), 1.0))
+    col_step = math_op('DIVIDE', 0.45, math_op('MAXIMUM', math_op('SUBTRACT', named("gt_ed_cols", 'FLOAT'), 1.0), 1.0))
     inner_x = math_op('LESS_THAN', math_op('ABSOLUTE', gx), 0.499)
     inner_t = math_op('MULTIPLY', math_op('GREATER_THAN', gt, 0.001), math_op('LESS_THAN', gt, 0.999))
     jx = math_op('MULTIPLY', jitter(11, col_step), math_op('MULTIPLY', inner_x, worn_f))
-    jt = math_op('MULTIPLY', jitter(23, 0.1), math_op('MULTIPLY', inner_t, worn_f))
+    jt = math_op('MULTIPLY', jitter(23, 0.12), math_op('MULTIPLY', inner_t, worn_f))
     joined = store(join.outputs[0], "gt_ed_x", math_op('ADD', gx, jx), 'POINT', 'FLOAT')
     joined = store(joined, "gt_ed_t", math_op('ADD', gt, jt), 'POINT', 'FLOAT')
     t_in = named("gt_ed_t", 'FLOAT')        # 0 at the edge, 1 at the inner side
@@ -457,7 +478,11 @@ def _build_node_group():
     b.link(cf, cf_rgb.inputs[0])
     broken_f = math_op('GREATER_THAN', cf_rgb.outputs[0], 0.6)
     facet_on = math_op('MULTIPLY', math_op('MULTIPLY', broken_f, sharp), math_op('MINIMUM', math_op('MULTIPLY', out["Wear"], 1e4), 1.0))
-    facet_tilt = scaled(b.vec('SUBTRACT', cf, (0.5, 0.5, 0.5)), math_op('MULTIPLY', facet_on, 0.25))
+    # every face gets a slight tilt of its own (decimated look), chamfers a bit more
+    worn_on = math_op('MINIMUM', math_op('MULTIPLY', out["Wear"], 1e4), 1.0)
+    facet_tilt = scaled(b.vec('SUBTRACT', cf, (0.5, 0.5, 0.5)),
+                        math_op('ADD', math_op('MULTIPLY', facet_on, 0.25),
+                                math_op('MULTIPLY', math_op('MULTIPLY', sharp, worn_on), 0.15)))
     # sharp = 1 keeps a little grain on the intact parts, none on the chamfers
     soft_amount = math_op('MULTIPLY', math_op('SUBTRACT', 1.0, math_op('MULTIPLY', sharp, 0.8)),
                           math_op('SUBTRACT', 1.0, facet_on))
@@ -466,7 +491,14 @@ def _build_node_group():
     flat = b.node('GeometryNodeFieldOnDomain', domain='FACE', data_type='FLOAT_VECTOR')
     b.link(n_edge, _sock(flat.inputs, "Value", 'VECTOR'))
     base = b.lerp(nrm_smooth, normalize(_sock(flat.outputs, "Value", 'VECTOR')), facet_on)
-    nrm = normalize(b.vec('ADD', base, rough))
+    nrm_round = normalize(b.vec('ADD', base, rough))
+    # Decimated look: with Wear Sharpness every face of a worn strip is flat (its
+    # normal is constant over the face), so the rounded bevel turns into irregular
+    # low-poly triangles (the grid is jittered and triangulated), like a Decimate.
+    decim = b.node('GeometryNodeFieldOnDomain', domain='FACE', data_type='FLOAT_VECTOR')
+    b.link(nrm_round, _sock(decim.inputs, "Value", 'VECTOR'))
+    nrm = normalize(b.lerp(nrm_round, normalize(_sock(decim.outputs, "Value", 'VECTOR')),
+                           math_op('MULTIPLY', sharp, worn_on)))
     # Lift (float above the surface) along normals the neighbouring strips share, so
     # they meet exactly instead of leaving hairline cracks where the edge shows through:
     # at the edge along the edge normal, far enough to clear both faces by Offset; at
@@ -546,7 +578,7 @@ def _build_node_group():
 # Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
 # get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
 # otherwise they would keep the old tree forever (it is reused by name).
-GROUP_VERSION = 13
+GROUP_VERSION = 15
 # Inputs whose saved value is dropped when upgrading from older versions (they had
 # no effect there, so the new default applies): {input name: first version it worked}.
 _RESET_BEFORE = {"Concave Edges": 4}
