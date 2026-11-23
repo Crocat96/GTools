@@ -25,6 +25,7 @@ from .sharp_subtract import _set_input
 # file are swapped for this one when Edge Decal is run on the object again.
 NODE_GROUP_NAME = "GT_EdgeDecal_v2"
 MODIFIER_NAME = "Edge Decal"
+MASK_NAME = "EdgeDecal_Mask"
 
 
 def _build_node_group():
@@ -56,6 +57,9 @@ def _build_node_group():
     # 0 = soft, blobby wear; 1 = sharp, angular chips (concrete)
     s = iface.new_socket("Wear Sharpness", in_out='INPUT', socket_type='NodeSocketFloat')
     s.default_value, s.min_value, s.max_value, s.subtype = 0.8, 0.0, 1.0, 'FACTOR'
+    # the strips copy this UV map from the faces under them (set to the active one)
+    s = iface.new_socket("UV Map", in_out='INPUT', socket_type='NodeSocketString')
+    s.default_value = "UVMap"
 
     b = _Builder(ng)
     b.column(-2400)
@@ -94,7 +98,7 @@ def _build_node_group():
     _sock(mid_n.inputs, "Scale").default_value = 0.5
     mid = _sock(mid_n.outputs, "Vector")
 
-    sides, corners = [], []
+    sides, corners, side_faces = [], [], []
     for k in (0, 1):
         b.column(-1800 + 300 * k)
         coe = b.node('GeometryNodeCornersOfEdge')
@@ -103,6 +107,7 @@ def _build_node_group():
         foc = b.node('GeometryNodeFaceOfCorner')
         b.link(_sock(coe.outputs, "Corner Index"), _sock(foc.inputs, "Corner Index"))
         face = _sock(foc.outputs, "Face Index")
+        side_faces.append(face)
         samples = []
         for field in ('GeometryNodeInputNormal', 'GeometryNodeInputPosition'):
             src = b.node(field)
@@ -272,6 +277,8 @@ def _build_node_group():
         g = store(g, name, value, 'EDGE')
     g = store(g, "gt_ed_len", length, 'EDGE', 'FLOAT')
     for k in (0, 1):
+        g = store(g, f"gt_ed_fi{k}", side_faces[k], 'EDGE', 'INT')
+    for k in (0, 1):
         # Clamp overlap: if the cuts at both ends don't fit in the edge (a short edge,
         # a wide strip), the strip is narrowed so they just do, instead of folding over.
         cut = math_op('ADD', math_op('MAXIMUM', shifts[k][0], 0.0), math_op('MAXIMUM', shifts[k][1], 0.0))
@@ -353,6 +360,7 @@ def _build_node_group():
         pts = store(pts, "gt_ed_mf1", named(f"gt_ed_m{k}1"), 'POINT')
         pts = store(pts, "gt_ed_mf2", named(f"gt_ed_m{k}2"), 'POINT')
         pts = store(pts, "gt_ed_df", named(f"gt_ed_d{k}"), 'POINT')
+        pts = store(pts, "gt_ed_fid", named(f"gt_ed_fi{k}", 'INT'), 'POINT', 'INT')
         rot = b.node('FunctionNodeAxesToRotation', primary_axis='X', secondary_axis='Y')
         b.link(named("gt_ed_dir"), _sock(rot.inputs, "Primary Axis"))
         b.link(named(f"gt_ed_d{k}"), _sock(rot.inputs, "Secondary Axis"))
@@ -555,8 +563,34 @@ def _build_node_group():
     setn = b.node('GeometryNodeSetMeshNormal', mode='FREE', domain='POINT')
     b.link(_sock(shade_e.outputs, "Mesh"), _sock(setn.inputs, "Mesh"))
     b.link(nrm, _sock(setn.inputs, "Custom Normal"))
+    # UVs: each strip copies the UV map of the face it lies on (nearest point on that
+    # face only, so seams and the other face never leak in): the textures line up.
+    uv_src = b.node('GeometryNodeInputNamedAttribute', data_type='FLOAT_VECTOR')
+    b.link(out["UV Map"], _sock(uv_src.inputs, "Name"))
+    near = b.node('GeometryNodeSampleNearestSurface', data_type='FLOAT_VECTOR')
+    b.link(geo, _sock(near.inputs, "Mesh"))
+    b.link(_sock(uv_src.outputs, "Attribute"), _sock(near.inputs, "Value"))
+    face_idx = b.node('GeometryNodeInputIndex')
+    b.link(face_idx.outputs[0], _sock(near.inputs, "Group ID"))
+    b.link(b.node('GeometryNodeInputPosition').outputs[0], _sock(near.inputs, "Sample Position"))
+    b.link(named("gt_ed_fid", 'INT'), _sock(near.inputs, "Sample Group ID"))
+    put_uv = b.node('GeometryNodeStoreNamedAttribute', domain='CORNER', data_type='FLOAT2')
+    b.link(_sock(setn.outputs, "Mesh"), _sock(put_uv.inputs, "Geometry"))
+    b.link(out["UV Map"], _sock(put_uv.inputs, "Name"))
+    b.link(_sock(near.outputs, "Value"), _sock(put_uv.inputs, "Value"))
+    # Mask (color attribute EdgeDecal_Mask): white at the edge, black at the strip's
+    # inner border; the rest of the mesh is black.
+    with_uv = _sock(put_uv.outputs, "Geometry")
+    masked = store(with_uv, MASK_NAME, math_op('SUBTRACT', 1.0, named("gt_ed_t", 'FLOAT')), 'POINT', 'FLOAT_COLOR')
+    # Material: each strip face remembers the material index of the face it lies on
+    mat_src = b.node('GeometryNodeInputMaterialIndex')
+    mat_s = b.node('GeometryNodeSampleIndex', domain='FACE', data_type='INT')
+    b.link(geo, _sock(mat_s.inputs, "Geometry"))
+    b.link(mat_src.outputs[0], _sock(mat_s.inputs, "Value", 'INT'))
+    b.link(named("gt_ed_fid", 'INT'), _sock(mat_s.inputs, "Index"))
+    # stored + 1: the base mesh's faces read 0 after the join and are left alone
+    masked = store(masked, "gt_ed_mat", math_op('ADD', _sock(mat_s.outputs, "Value", 'INT'), 1.0), 'FACE', 'INT')
     clean = b.node('GeometryNodeRemoveAttribute')
-    b.link(_sock(setn.outputs, "Mesh"), _sock(clean.inputs, "Geometry"))
     try:
         _sock(clean.inputs, "Pattern Mode").default_value = 'Wildcard'
     except (TypeError, KeyError):
@@ -565,10 +599,19 @@ def _build_node_group():
 
     b.column(600)
     final = b.node('GeometryNodeJoinGeometry')
-    b.link(_sock(clean.outputs, "Geometry"), final.inputs[0])
+    b.link(masked, final.inputs[0])
     b.link(geo_sharp, final.inputs[0])
+    # strips use the material of the face under them (the join gives them the base
+    # mesh's material list; their own faces would otherwise get an empty slot)
+    mat_read = b.node('GeometryNodeInputNamedAttribute', data_type='INT')
+    _sock(mat_read.inputs, "Name").default_value = "gt_ed_mat"
+    set_mat = b.node('GeometryNodeSetMaterialIndex')
+    b.link(final.outputs[0], _sock(set_mat.inputs, "Geometry"))
+    b.link(math_op('GREATER_THAN', _sock(mat_read.outputs, "Attribute"), 0.5), _sock(set_mat.inputs, "Selection"))
+    b.link(math_op('SUBTRACT', _sock(mat_read.outputs, "Attribute"), 1.0), _sock(set_mat.inputs, "Material Index"))
+    b.link(_sock(set_mat.outputs, "Geometry"), _sock(clean.inputs, "Geometry"))
     gout = b.node('NodeGroupOutput')
-    b.link(final.outputs[0], gout.inputs[0])
+    b.link(_sock(clean.outputs, "Geometry"), gout.inputs[0])
     ng[VERSION_KEY] = GROUP_VERSION
     return ng
 
@@ -576,7 +619,7 @@ def _build_node_group():
 # Bump GROUP_VERSION whenever the node tree changes: files saved with an older group
 # get it rebuilt and swapped in automatically (load, add-on enable, running the tool),
 # otherwise they would keep the old tree forever (it is reused by name).
-GROUP_VERSION = 17
+GROUP_VERSION = 19
 # Inputs whose saved value is dropped when upgrading from older versions (they had
 # no effect there, so the new default applies): {input name: first version it worked}.
 _RESET_BEFORE = {"Concave Edges": 4}
@@ -626,6 +669,8 @@ def _swap_group(old, new):
                     except (KeyError, AttributeError, TypeError):
                         pass
             mod.node_group = new
+            if "UV Map" not in values:
+                values["UV Map"] = _active_uv(obj)
             for name, value in values.items():
                 try:
                     _set_input(mod, _input_id(new, name), value)
@@ -652,6 +697,11 @@ def _deferred_upgrade():
     except Exception as ex:  # never break enabling the add-on
         print(f"G-Tools Edge Decal upgrade: {ex}")
     return None
+
+
+def _active_uv(obj):
+    uvs = getattr(getattr(obj, "data", None), "uv_layers", None)
+    return uvs.active.name if uvs and uvs.active else "UVMap"
 
 
 def _input_id(ng, name):
@@ -689,6 +739,7 @@ class GTOOLS_OT_edge_decal(bpy.types.Operator):
                         except KeyError:
                             pass
                     mod.node_group = ng
+                    values["UV Map"] = _active_uv(obj)
                     for name, value in values.items():
                         _set_input(mod, _input_id(ng, name), value)
                     updated += 1
@@ -699,6 +750,7 @@ class GTOOLS_OT_edge_decal(bpy.types.Operator):
             size = max(obj.dimensions) or 1.0
             _set_input(mod, _input_id(ng, "Width"), size * 0.01)
             _set_input(mod, _input_id(ng, "Offset"), size * 0.0002)
+            _set_input(mod, _input_id(ng, "UV Map"), _active_uv(obj))
             _put_last(obj, mod)
             added += 1
         if updated:
